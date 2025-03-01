@@ -1,0 +1,44 @@
+cabal-version:      3.4
+name:               tallinn-softfloat
+version:            0.1.0.0
+license:            BSD-2-Clause
+synopsis:           A softfloat library
+description:        A softfloat library.
+license-file:       LICENSE
+category:           Math
+build-type:         Simple
+author:             Markus Läll
+maintainer:         markus.l2ll@gmail.com
+
+common lang
+    ghc-options: -Wall -Wno-name-shadowing
+    default-language: GHC2021
+    default-extensions:
+        AllowAmbiguousTypes
+        LambdaCase
+        DerivingVia
+        DataKinds
+        MultiWayIf
+        NoImplicitPrelude
+
+library
+    import:           lang
+    exposed-modules:
+        LocalPrelude
+        Data.BitArray
+        Data.Float
+    build-depends:
+        base >=4.12.0.0 && < 5
+    hs-source-dirs:   src
+
+test-suite tallinn-softfloat-test
+    import:           lang
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   test
+    main-is:          Main.hs
+    build-depends:
+        tallinn-softfloat
+      , base
+      , hedgehog
+      , tasty
+      , tasty-hedgehog
