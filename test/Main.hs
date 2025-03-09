@@ -1,6 +1,7 @@
 module Main where
 
 import LocalPrelude
+import Data.Word
 import Control.Monad
 import Control.Monad.IO.Class
 
@@ -23,6 +24,7 @@ main = Tasty.defaultMain $ Tasty.testGroup "shoftfloat"
   , Tasty.testProperty "no rounding" prop_shorterValuesNeedNoRounding
   -- parsing, rendering
   , Tasty.testProperty "unit test: float parsing" unitTest_floatParsing
+  , Tasty.testProperty "parse/show matches native floats" prop_parseShowRoundtripNativeFloat
   ]
 
 unitTest_floatParsing :: H.Property
@@ -79,6 +81,14 @@ prop_shorterValuesNeedNoRounding = H.property $ do
   less <- H.forAll $ Gen.integral $ Range.linear @Int 0 more
   bits <- H.forAll $ replicateM less bit_
   roundBits more bits === (bits, False) -- False = no overflow
+
+prop_parseShowRoundtripNativeFloat :: H.Property
+prop_parseShowRoundtripNativeFloat = H.property $ do
+  int :: Word32 <- H.forAll $ Gen.enumBounded
+  frac :: Word32 <- H.forAll $ Gen.enumBounded
+  let str = show int <> "." <> show frac
+  liftIO $ putStrLn str
+  show (read str :: Binary32) === show (read str :: Float)
 
 -- * Helpers
 

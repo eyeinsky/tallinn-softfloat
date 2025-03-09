@@ -171,6 +171,7 @@ fromIntParts int maybeFracInt =
     ] <> xs
   , if
     | 0 <- int, Nothing <- maybeFracInt -> (0, 0)
+    | 0 <- int, Just 0 <- maybeFracInt -> (0, 0)
     | otherwise -> (biasedExponent_, mantissa' :: BitArray m)
   )
   where
@@ -242,7 +243,7 @@ showDescribeFloat :: forall b e m . Format b e m -> (String, String)
 showDescribeFloat float@(Finite sign e m)
   | 0 <- e = case m of
       -- zero: exponent and mantiassa are zeroes
-      0 -> (s <> "0", ws [signWord, Just "zero"])
+      0 -> (s <> "0.0", ws [signWord, Just "zero"])
       -- all-zero exponent, but non-zero mantissa
       _ -> (viaRational, "subnormal")
   | maxBound == e  = case m of
