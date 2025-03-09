@@ -102,12 +102,56 @@ instance (KnownNat b, KnownNat e, KnownNat m) => Bits (Format b e m) where
 instance (KnownNat b, KnownNat e, KnownNat m) => Num (Format b e m) where
   (+) = u -- :: a -> a -> a
   (-) = u --  :: a -> a -> a
-  (*) = u --  :: a -> a -> a
+  f1@(Finite s1 e1 m1) * f2@(Finite s2 e2 m2) = trace (unlines
+    [ ""
+    , l "e1, unbiased" $ unbiasedExponent f1
+    , l "e2, unbiased" $ unbiasedExponent f2
+    , l "m1'" m1'
+    , l "m2'" m2'
+    , l "m1+1" m1''
+    , l "m2+1" m2''
+    , l "m'" m'
+    , l "m'" $ (BitArray m' :: BitArray 8)
+    , l "m'bitlist" $ m'bitlist
+    , l "m'bitlist" $ reverse $ drop (ix * 2) $ reverse m'bitlist
+    , l "e'shifts" $ e'shifts
+    , l "e'new" e'new
+    , l "e'new'biased" e'new'biased
+    , "float: " <> showFloatBits float
+    ]) $
+    float
+    where
+      BitArray m1' = m1
+      BitArray m2' = m2
+      ix = intVal @m
+      m1'' = setBit m1' ix
+      m2'' = setBit m2' ix
+      m' = m1'' * m2''
+      m'bitlist = bitList m'
+      e'shifts = length (drop (ix * 2) m'bitlist) - 1
+      e'new = unbiasedExponent f1 + unbiasedExponent f2 + fromIntegral e'shifts
+      e'new'biased = addBias e'new
+      m'' = bitsToArrayBE $ tail $ m'bitlist
+
+      float = Finite (s1 `xor` s2) e'new'biased m''
+
+      -- (m'bitlist2, overflow) = roundBits (intVal @m) m'bitlist
+
   negate f = f { sign = negate (sign f) }
   abs f = f { sign = O }
   signum f = (one @b) { sign = sign f }
   fromInteger i = let (_, (e, m)) = fromIntParts (fromInteger i) Nothing
     in Finite (boolBit $ i < 0) e m
+
+hot' = let
+  str = "2.25" :: String
+  a = read str :: Binary32
+  in do
+  putStrLn $ str <> " string is parsed into " <> showFloatBits a
+  p "exponent" $ bitArrayInt $ unbiasedExponent a
+  p' "significand (1+)" $ "I : " <> show (bitListFinite (mantissa a))
+  -- exporent 1100, multiplied I,O.O,I, O,O,O,O
+  print $ a * a
 
 fromIntegerBits :: forall b e m . (KnownNat b, KnownNat e, KnownNat m) => Integer -> Format b e m
 fromIntegerBits = fromBits @Integer
@@ -132,6 +176,12 @@ fromBits source = Finite
 
 l label a = label <> ": " <> show a
 lxs label xs = label <> ": " <> show xs <> " (" <> show (length xs) <> ")"
+
+p :: Show a => String -> a -> IO ()
+p label a = putStrLn $ label <> ": " <> show a
+
+p' :: String -> String -> IO ()
+p' label str = putStrLn $ label <> ": " <> str
 
 parseFloat
   :: forall b e m . (KnownNat b, KnownNat e, KnownNat m)
