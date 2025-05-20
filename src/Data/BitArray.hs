@@ -186,29 +186,30 @@ topBits a n = foldl' (\acc i -> testBit a i : acc) [] $ take n [max, max - 1 .. 
 -- * Bitlist
 
 -- | Round bitlist to @n@ digits. The returned Bool indicates whether
--- there was an overflow. Input/output are big-endian.
+-- by rounding up an additional 1 bit was added as the most
+-- significant bit. Input/output are big-endian.
 roundBits :: Int -> [Bit] -> ([Bit], Bool)
-roundBits 0 bits = (bits, False)
 roundBits n bits = let
     (a, overflow) = splitAt n bits
     a' = reverse a -- little-endian
-    (bs, o) = case overflow of
-      -- down: truncate
-      [] -> noOverflow a'
-      [O] -> error "TODO: this shouldn't occur actually"
-      O : _ : _ -> noOverflow a'
-      -- tie: closest even
-      [I] -> case a' of
-        I : _ -> ceiling a'
-        O : _ -> noOverflow a'
-        [] -> error "TODO"
-      -- up: ceiling
-      I : _ : _ -> ceiling a'
-      where
-        noOverflow a = (a, False)
-        ceiling :: [Bit] -> ([Bit], Bool) -- expects little-endian bits
-        ceiling bits' = case bits' of
-          O : rest -> (I : rest, False)
-          I : rest -> let (bs, o) = ceiling rest in (O : bs, o)
-          [] -> ([I], True)
-  in (reverse bs, o)
+  in case overflow of
+      -- first overflow bit is zero or there are no overflow bits => truncated
+      [] -> (a, False)
+      O : _ -> (a, False)
+      I : rest -> if all (== O) rest
+        then case a' of        -- it's a tie
+          I : _ -> ceiling a'  -- remainder is odds => ceiling
+          O : _ -> (a, False)  -- remainder is even => floor
+          []    -> (a, False)  -- same
+        else ceiling a'
+
+  where
+    ceiling a = let (x, y) = add1 a in (reverse x, y)
+
+-- | Add 1 to little-endian bit list. Second member signifies whether
+-- an extra digit was added.
+add1 :: [Bit] -> ([Bit], Bool)
+add1 bits' = case bits' of
+  O : rest -> (I : rest, False)
+  I : rest -> let (bs, o) = add1 rest in (O : bs, o)
+  [] -> ([I], True)
