@@ -4,6 +4,7 @@ import LocalPrelude
 import Data.Word
 import Control.Monad
 import Control.Monad.IO.Class
+import Control.Concurrent
 
 import Hedgehog ((===))
 import Hedgehog qualified as H
@@ -19,27 +20,41 @@ import Data.Float
 main :: IO ()
 main = Tasty.defaultMain $ Tasty.testGroup "shoftfloat"
   [ Tasty.testProperty "noop" $ H.property $ return ()
-  -- rounding
-  , Tasty.testProperty "bitlist rounding unit test" unitTest_bitlistRounding
-  , Tasty.testProperty "no rounding" prop_shorterValuesNeedNoRounding
+
   -- parsing, rendering
   , Tasty.testProperty "unit test: float parsing" unitTest_floatParsing
   , Tasty.testProperty "parse/show matches native floats" prop_parseShowRoundtripNativeFloat
+
+  -- rounding
+  , Tasty.testProperty "bitlist rounding unit test" unitTest_bitlistRounding
+  , Tasty.testProperty "no rounding" prop_shorterValuesNeedNoRounding
   ]
+
+-- runTest :: H.Property -> IO ()
+runTest msg test = Tasty.defaultMain $ Tasty.testGroup msg [ Tasty.testProperty "test" test ]
+
+hot = do
+  let (debug, (f, leftover)) = parseFloat "0.1"
 
 unitTest_floatParsing :: H.Property
 unitTest_floatParsing = unitTest $ do
   let read' str = read str :: Binary16
-  read' "0" === zero
-  read' "0" === 0
-  describe' (read "0") === ("0", "positive zero")
-  describe' (read "-0") === ("-0", "negative zero")
-  describe' (Finite O maxBound 0) === ("inf", "positive infinity")
-  describe' (Finite I maxBound 0) === ("-inf", "negative infinity")
-  describe' (Finite O maxBound 1) === ("snan", "positive signaling nan")
-  describe' (Finite I maxBound 1) === ("-snan", "negative signaling nan")
-  describe' (Finite O maxBound (1 + signalingBound @2 @10)) === ("nan", "positive nan")
-  describe' (Finite I maxBound (1 + signalingBound @2 @10)) === ("-nan", "negative nan")
+  read' "0" === Finite { sign = O, exponent = 0, mantissa = 0 } -- "0" parses as all zero field values for sign, exponent and mantissa
+  read' "0" === 0b0                                             -- "0" parses as all zero bytes
+  read' "0" === 0                                               -- same
+
+  -- monomorphized `showDescribeFloat`
+  let showDescribeFloat' :: Binary16 -> (String, String)
+      showDescribeFloat' = showDescribeFloat
+
+  showDescribeFloat' (read "0") === ("0.0", "positive zero")
+  showDescribeFloat' (read "-0") === ("-0.0", "negative zero")
+  showDescribeFloat' (Finite O maxBound 0) === ("inf", "positive infinity")
+  showDescribeFloat' (Finite I maxBound 0) === ("-inf", "negative infinity")
+  showDescribeFloat' (Finite O maxBound 1) === ("snan", "positive signaling nan")
+  showDescribeFloat' (Finite I maxBound 1) === ("-snan", "negative signaling nan")
+  showDescribeFloat' (Finite O maxBound (1 + signalingBound @2 @10)) === ("nan", "positive nan")
+  showDescribeFloat' (Finite I maxBound (1 + signalingBound @2 @10)) === ("-nan", "negative nan")
 
   let f12 = read' "1.2"
   f12 === fromBits @Integer 0b0011110011001101
@@ -54,9 +69,14 @@ unitTest_floatParsing = unitTest $ do
   getPayload (Finite O maxBound 0b1001 :: Binary16) === Just (0b1001 :: BitArray 9)
   getPayload (Finite O maxBound (1 + signalingBound @2 @10) :: Binary16) === Nothing
 
-  where
-    describe' :: Binary16 -> (String, String)
-    describe' = showDescribeFloat
+prop_parseShowRoundtripNativeFloat :: H.Property
+prop_parseShowRoundtripNativeFloat = H.property $ do
+  int :: Word32 <- H.forAll $ Gen.enumBounded
+  frac :: Word32 <- H.forAll $ Gen.enumBounded
+  let str = show int <> "." <> show frac
+  show (read str :: Binary32) === show (read str :: Float)
+
+-- * Rounding
 
 unitTest_bitlistRounding :: H.Property
 unitTest_bitlistRounding = unitTest $ do
@@ -74,21 +94,50 @@ unitTest_bitlistRounding = unitTest $ do
   test [I, O,O,O, I,O,I,O] ===   ([I, O,O,I], False) -- up
   test [I, I,I,I, I,I,O,O] === ([I,O, O,O,O], True)  -- up, overflow
 
--- | Round a list of bits.
+-- | Test `roundBits`: round the bitlist `bits` generated to be to `more`
 prop_shorterValuesNeedNoRounding :: H.Property
 prop_shorterValuesNeedNoRounding = H.property $ do
-  more <- H.forAll $ Gen.integral $ Range.linear @Int 0 10
-  less <- H.forAll $ Gen.integral $ Range.linear @Int 0 more
-  bits <- H.forAll $ replicateM less bit_
-  roundBits more bits === (bits, False) -- False = no overflow
+  bitsLength <- H.forAll $ Gen.integral $ Range.linear @Int 0 10
+  bits <- H.forAll $ replicateM bitsLength bit_
+  moreThanBitsLength <- H.forAll $ Gen.integral $ Range.linear @Int bitsLength (bitsLength + 10)
+  roundBits moreThanBitsLength bits === (bits, False)
 
-prop_parseShowRoundtripNativeFloat :: H.Property
-prop_parseShowRoundtripNativeFloat = H.property $ do
-  int :: Word32 <- H.forAll $ Gen.enumBounded
-  frac :: Word32 <- H.forAll $ Gen.enumBounded
-  let str = show int <> "." <> show frac
-  liftIO $ putStrLn str
-  show (read str :: Binary32) === show (read str :: Float)
+-- | Comprehensive test for `roundBits`.
+prop_longerValuesRoundCorrectly :: H.Property
+prop_longerValuesRoundCorrectly = H.property $ do
+  roundToLength <- H.forAll $ Gen.integral $ Range.linear @Int 0 10
+  bits <- H.forAll $ replicateM roundToLength bit_
+  overflowLength <- H.forAll $ Gen.integral $ Range.linear @Int 0 10
+  overflow <- H.forAll $ replicateM overflowLength bit_
+  let value = bits <> overflow
+      res@(rounded, extraDigit) = roundBits roundToLength value
+
+  H.footnote $ "extraDigit " <> show extraDigit
+  H.footnote $ "rounded value " <> show rounded
+  H.footnote $ "constructed value " <> show value <> " " <> show (bits, overflow) <> ", rounded to " <> show roundToLength
+
+  let overflowIsTie = case overflow of
+        I : rest -> all (O ==) rest
+        _ -> False
+      overflowIsMoreThanHalf = case overflow of
+        I : rest -> any (I ==) rest
+        _ -> False
+      remainderIsEven = case bits of
+        [] -> True
+        _ -> case reverse bits of
+          O : rest -> True
+          _ -> False
+      mustRoundUp = overflowIsMoreThanHalf || overflowIsTie && not remainderIsEven
+
+  if
+    | mustRoundUp -> do
+        bits H./== value
+        reverse (fst (add1 (reverse bits))) === rounded
+        when extraDigit $ H.assert $ all (== I) bits
+    | not mustRoundUp -> do
+        bits === rounded
+        extraDigit === False
+    | otherwise -> H.footnote "This never happens." >> H.failure
 
 -- * Helpers
 

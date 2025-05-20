@@ -135,8 +135,6 @@ instance (KnownNat b, KnownNat e, KnownNat m) => Num (Format b e m) where
 
       float = Finite (s1 `xor` s2) e'new'biased m''
 
-      -- (m'bitlist2, overflow) = roundBits (intVal @m) m'bitlist
-
   negate f = f { sign = negate (sign f) }
   abs f = f { sign = O }
   signum f = (one @b) { sign = sign f }
