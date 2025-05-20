@@ -32,6 +32,8 @@ type Binary64   = Format    2       11       52    -- double-precision          
 type Binary128  = Format    2       15      112    -- quad-precision            16383
 type Binary256  = Format    2       19      236    -- octuple-precision        262143
 
+type Half = Binary16
+
 
 bias :: forall e . KnownNat e => BitArray e
 bias = foldl' setBit 0 [0 .. (intVal @e) - 2]
@@ -212,11 +214,13 @@ fromIntParts
   :: forall e m . (KnownNat e, KnownNat m)
   => Natural -> Maybe Natural -> ([String], (BitArray e, BitArray m))
 fromIntParts int maybeFracInt =
-  ( [ l "integer and fraction ints" (int, maybeFracInt)
+  ( [ "<fromIntParts>"
+    , l "integer and fraction ints" (int, maybeFracInt)
     , l "int bits" $ intBits
     , l "target bit widths, e m" (intVal @e, intVal @m)
     , l "exponent" exponent
-    ] <> xs
+    ] <> xs <>
+    [ "</fromIntParts>" ]
   , if
     | 0 <- int, Nothing <- maybeFracInt -> (0, 0)
     | 0 <- int, Just 0 <- maybeFracInt -> (0, 0)
@@ -230,16 +234,19 @@ fromIntParts int maybeFracInt =
     biasedExponent   = addBias exponentBitArray :: BitArray e
     mantissaBits :: [Bit]
     biasedExponent_ :: BitArray e
+
     (mantissaBits, biasedExponent_, xs) = case maybeFracInt of
       Just fracInt -> let
         fracBits = fractionPartBits fracInt :: [Bit]
         (m, overflow) = roundBits (intVal @m + 1) (intBits <> fracBits) :: ([Bit], Bool)
-        debug = [ lxs "fracBits" $ take 35 fracBits
-                , l "round to N bits" (intVal @m)
+        debug = [ "<maybeFracInt>"
+                , lxs "fracBits" $ take 35 fracBits
+                , l "round to N bits" (intVal @m, intVal @m + 1)
                 , lxs "m" $ take 35 m
                 , l "overflow" overflow
                 , l "exponent initial" biasedExponent
                 , l "exponent +1" $ exponent + 1
+                , "</maybeFracInt>"
                 ]
 
         in if overflow
@@ -253,7 +260,9 @@ fromIntParts int maybeFracInt =
 
 -- | Take fraction part digits as integer, convert it to bitlist. Big-endian.
 fractionPartBits :: Natural -> [Bit]
-fractionPartBits i = rationalToBits (i % (10^(length (show i))))
+fractionPartBits i = rationalToBits (i % 10^digitCount)
+  where
+    digitCount = length $ show i
 
 -- | big-endian
 rationalToBits :: Ratio Natural -> [Bit]

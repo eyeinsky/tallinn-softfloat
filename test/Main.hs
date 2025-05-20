@@ -34,7 +34,9 @@ main = Tasty.defaultMain $ Tasty.testGroup "shoftfloat"
 runTest msg test = Tasty.defaultMain $ Tasty.testGroup msg [ Tasty.testProperty "test" test ]
 
 hot = do
-  let (debug, (f, leftover)) = parseFloat "0.1"
+  let (debug, (f :: Half, leftover)) = parseFloat "0.1"
+  putStrLn $ unlines debug
+  print ()
 
 unitTest_floatParsing :: H.Property
 unitTest_floatParsing = unitTest $ do
@@ -138,6 +140,12 @@ prop_longerValuesRoundCorrectly = H.property $ do
         bits === rounded
         extraDigit === False
     | otherwise -> H.footnote "This never happens." >> H.failure
+
+-- * Values
+
+-- | Half, parsed from 0.1 by float.exposed
+fe_0p1 = fromIntegerBits 0b0_01011_1001100110 :: Half
+
 
 -- * Helpers
 
