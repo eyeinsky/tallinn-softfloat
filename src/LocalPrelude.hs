@@ -24,3 +24,6 @@ integerVal = natVal @e Proxy
 
 intVal :: forall n a . (KnownNat n, Num a) => a
 intVal = fromIntegral (integerVal @n)
+
+traceLabelShow :: Show a => String -> a -> a
+traceLabelShow label a = trace (label <> " < " <> show a <> " >") a

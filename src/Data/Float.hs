@@ -36,6 +36,8 @@ type Half = Binary16
 type Float = Binary32
 type Double = Binary64
 
+-- * Bias
+
 bias :: forall e . KnownNat e => BitArray e
 bias = foldl' setBit 0 [0 .. (intVal @e) - 2]
 
@@ -46,9 +48,16 @@ addBias :: forall e . BitArray e -> BitArray e
 addBias (BitArray n) = BitArray (n + biasN)
   where BitArray biasN = bias @e
 
+makeBiased :: forall ew . KnownNat ew => Int -> BitArray ew
+makeBiased e = BitArray $ if e < 0
+  then biasN - fromIntegral (abs e)
+  else biasN + fromIntegral e
+  where
+    BitArray biasN = bias @ew
+
 -- | Get the binary fraction of a float, i.e the 1/2 + 1/4 + 1/8 part
-binaryFraction :: Format b e m -> Rational
-binaryFraction (Finite _ _ (BitArray m :: BitArray m)) = foldl step 0 $ zip bitlist [1..]
+asBinaryFraction :: BitArray m -> Rational
+asBinaryFraction (BitArray m :: BitArray m) = foldl step 0 $ zip bitlist [1..]
   where
     step acc (bool, n) = if bool then acc + 1 % 2^n else acc
     bitlist = reverse $ map (\n -> testBit m n) [0 .. (fromIntegral (natVal @m Proxy) - 1)]
@@ -83,10 +92,18 @@ instance (KnownNat b, KnownNat e, KnownNat m) => Bits (Format b e m) where
   isSigned Finite{sign, exponent, mantissa} = sign == I
 
   testBit f@Finite{sign, exponent, mantissa} i
-    | i < mantissaWidth = testBit mantissa i
-    | i < lastBitIndex' - 1 = testBit exponent (i - mantissaWidth)
-    | i == lastBitIndex' = sign == I
-    | otherwise = False
+    | i < mantissaWidth =
+      -- traceLabelShow ("i < mantissaWidth" <> show (sign, exponent, mantissa, i)) $
+      testBit mantissa i
+    | i < lastBitIndex' =
+      -- traceLabelShow ("i < lastBitIndex' - 1" <> show (sign, exponent, mantissa, i)) $
+      testBit exponent (i - mantissaWidth)
+    | i == lastBitIndex' =
+      -- traceLabelShow ("i == lastBitIndex'" <> show (sign, exponent, mantissa, i)) $
+      sign == I
+    | otherwise =
+      -- traceLabelShow ("otherwise'" <> show (sign, exponent, mantissa, i)) $
+      False
     where
       mantissaWidth = intVal @m
       lastBitIndex' = lastBitIndex f
@@ -176,7 +193,11 @@ fromBits source = Finite
         mapping = zip [from .. (to - 1) ] [0..]
 
 l label a = label <> ": " <> show a
-lxs label xs = label <> ": " <> show xs <> " (" <> show (length xs) <> ")"
+lxs label cap xs = let
+    xs' = take cap xs
+    cappedMsg = if length xs' == cap then ", capped" else ""
+    value = show xs' <> " (" <> show (length xs') <> cappedMsg <> ")"
+  in label <> ": " <> value
 
 p :: Show a => String -> a -> IO ()
 p label a = putStrLn $ label <> ": " <> show a
@@ -190,7 +211,10 @@ parseFloat
 parseFloat str = (
   [ l "input string" str ]
   <> debug <>
-  [ l "float" $ showFloatBits float
+  [ l "bit" $ show sign
+  , l "exponent" $ bitStringFinite e
+  , l "mantissa" $ bitStringFinite m
+  , l "float" $ showFloatBits float
   , l "float" $ float
   ]
   , (float, rest))
@@ -216,10 +240,10 @@ fromIntParts
   => Natural -> Maybe Natural -> ([String], (BitArray e, BitArray m))
 fromIntParts int maybeFracInt =
   ( [ "<fromIntParts>"
-    , l "integer and fraction ints" (int, maybeFracInt)
-    , l "int bits" $ intBits
-    , l "target bit widths, e m" (intVal @e, intVal @m)
-    , l "exponent" exponent
+    -- , l "integer and fraction ints" (int, maybeFracInt)
+    -- , l "int bits" $ intBits
+    -- , l "target bit widths, e m" (intVal @e, intVal @m)
+    -- , l "exponent" exponent
     ] <> xs <>
     [ "</fromIntParts>" ]
   , if
@@ -229,47 +253,61 @@ fromIntParts int maybeFracInt =
   )
   where
     intBits = bitList int
-    exponent         = max (length intBits - 1) 0
-    exponentBitList  = bitList exponent :: [Bit] -- big-endian
-    exponentBitArray = bitsToArrayLE exponentBitList :: BitArray e
-    biasedExponent   = addBias exponentBitArray :: BitArray e
+    -- exponent         = max (length intBits - 1) 0
+    -- exponentBitList  = bitList exponent :: [Bit] -- big-endian
+    -- exponentBitArray = bitsToArrayLE exponentBitList :: BitArray e
+    -- biasedExponent   = addBias exponentBitArray :: BitArray e
+
     mantissaBits :: [Bit]
     biasedExponent_ :: BitArray e
-
     (mantissaBits, biasedExponent_, xs) = case maybeFracInt of
       Just fracInt -> let
+
         fracBits = fractionPartBits fracInt :: [Bit]
-        (m, overflow) = roundBits (intVal @m + 1) (intBits <> fracBits) :: ([Bit], Bool)
+        (mantissa, exp) = normalizeMantissa intBits fracBits
+        biasedExp = makeBiased exp :: BitArray e
+        (mantissa', extraDigit) = roundBits (intVal @m) mantissa
+
         debug = [ "<maybeFracInt>"
-                , lxs "fracBits" $ take 35 fracBits
-                , l "round to N bits (+implicit)" (intVal @m)
-                , lxs "m" m
-                , l "overflow" overflow
-               , l "exponent initial" biasedExponent
-                , l "exponent +1" $ exponent + 1
+                , lxs "int bits" 32 intBits
+                , lxs "fracBits bits" 32 fracBits
+                , lxs "mantissa (implicit 1)" 32 mantissa'
+                , l "exp" exp
+                , l "exp, biased" biasedExp
+                , l "extra digit" biasedExp
                 , "</maybeFracInt>"
                 ]
+        in
+        -- if extraDigit
+        -- then if maxBound == biasedExponent
+        --      then error "extraDigit"
+        --      else (mantissa', biasedExp + 1, debug)
 
-        in if overflow
-        then if maxBound == biasedExponent
-             then error "overflow"
-             else (m, biasedExponent + 1, debug)
-        else (m, biasedExponent, debug)
+        -- -- normal case
+        -- else
+          (mantissa', biasedExp, debug)
 
-      Nothing -> (intBits <> repeat O, biasedExponent, [])
+      Nothing -> let
+        -- (mantissa, exp) = normalizeMantissa intBits []
+        -- (mantissa', extraDigit) = roundBits (intVal @m) mantissa
+        -- biasedExp = makeBiased exp
+        in error "HERE" -- (mantissa', biasedExp, [ ])
 
-    mantissa' = bitsToArrayBE $ drop 1 mantissaBits :: BitArray m
+    mantissa' = bitsToArrayBE mantissaBits :: BitArray m
 
+-- | Take integer bits and fraction bits and produce mantissa bits
+-- (implicit leading bit removed) and an unbiased exponent.
 normalizeMantissa :: [Bit] -> [Bit] -> ([Bit], Int)
-normalizeMantissa intBitsBE fracBitsBE
+normalizeMantissa intBitsBE_ fracBitsBE
   | null intBitsBE = dropCountZeroes 0 fracBitsBE
-  | otherwise = (intBitsBE <> fracBitsBE, max (length intBitsBE - 1) 0)
+  | otherwise = (drop 1 intBitsBE <> fracBitsBE, max (length intBitsBE - 1) 0)
   where
+    intBitsBE = dropWhile (== O) intBitsBE_
     dropCountZeroes n xs = case xs of
       b : bs -> case b of
         I -> (bs, n - 1)
         O -> dropCountZeroes (n - 1) bs
-      [] -> (xs, n)
+      [] -> ([], 0)
 
 
 
@@ -343,10 +381,16 @@ getPayload (Finite _ _ (BitArray m)) = if not $ testBit m ix
 
 -- | Should this be in Fractional class?
 floatToRational :: forall b e m . Format b e m -> Rational
-floatToRational float@Finite{} = addSign (sign float) $ 2^^(exp - bitArrayInt (bias @e)) * (1 + binFrac)
+floatToRational (Finite sign exponent mantissa) =
+  addSign sign $ 2^^unbiasedExponent * (1 + binFrac)
+
   where
-    exp = bitArrayInt $ exponent float -- :: Integer
-    binFrac = binaryFraction float
+    BitArray biasedExponent = exponent
+    biasedExponent' = fromIntegral biasedExponent :: Int
+    bias' = fromIntegral $ bitArrayInt (bias @e) :: Int
+    unbiasedExponent = (biasedExponent' - bias')
+
+    binFrac = asBinaryFraction mantissa
     addSign :: Num a => Bit -> a -> a
     addSign sign b = case sign of
       O -> b

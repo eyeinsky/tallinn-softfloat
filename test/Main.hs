@@ -2,6 +2,7 @@ module Main where
 
 import LocalPrelude
 import Data.Word
+import Data.Int
 import Control.Monad
 import Control.Monad.IO.Class
 import Control.Concurrent
@@ -16,6 +17,7 @@ import Test.Tasty.Hedgehog qualified as Tasty
 import Data.BitArray
 import Data.Float hiding (Float, Double)
 import Data.Float qualified as Soft
+import Data.Bits
 
 import Foreign.Marshal.Alloc
 import Foreign.Ptr
@@ -27,7 +29,13 @@ main = Tasty.defaultMain $ Tasty.testGroup "shoftfloat"
 
   -- parsing, rendering
   , Tasty.testProperty "unit test: float parsing" unitTest_floatParsing
-  , Tasty.testProperty "parse/show matches native floats" prop_parseShowRoundtripNativeFloat
+  -- , Tasty.testProperty "parse/show matches native floats" prop_parseShowRoundtripNativeFloat
+  , Tasty.testProperty "normalize mantissa" prop_normalizeMantissa
+
+  -- parsing
+  , Tasty.testProperty
+    "Parsing floats from string results in same binary representation as native"
+    prop_parsingEquvalentToNative
 
   -- rounding
   , Tasty.testProperty "bitlist rounding unit test" unitTest_bitlistRounding
@@ -37,38 +45,94 @@ main = Tasty.defaultMain $ Tasty.testGroup "shoftfloat"
 -- runTest :: H.Property -> IO ()
 runTest msg test = Tasty.defaultMain $ Tasty.testGroup msg [ Tasty.testProperty "test" test ]
 
-prop_equalsNativeFloat :: H.Property
-prop_equalsNativeFloat = H.property $ do
-  strFloat <- H.forAll randomDecimalString
-  w <- liftIO $ getStorableFloat $ read strFloat
-  let w' = read strFloat :: Binary32
-  H.footnote $ unlines
-    [ "strFloat " <> strFloat
-    , "native " <> showBits w
-    , "soft   " <> showBits w'
-    , "" ]
-  bitListFinite w === bitListFinite w'
-  where
-    showBits x = unwords [show (head x'), show e, show m]
-      where
-        x' = bitListFinite x
-        (e, m) = splitAt 8 (tail x')
+prop_parsingEquvalentToNative :: H.Property
+prop_parsingEquvalentToNative = H.property $ do
+  str <- H.forAll randomDecimalString
+  compareParsingAgainstNative @Float @Word32 @Binary32 str
+  compareParsingAgainstNative @Double @Word64 @Binary64 str
 
+
+compareParsingAgainstNative
+  :: forall native word softfloat
+  . ( Storable native, Read native         -- native type, e.g Float, Double
+    , Storable word, FiniteBits word       -- matching word, e.g Word32, Word64
+    , FiniteBits softfloat, Read softfloat -- matching softfloat, e.g Finite 2 8 23
+    ) => String -> H.PropertyT IO ()
+compareParsingAgainstNative strFloat = do
+  w <- liftIO $ getStoredWord @native @word $ read strFloat
+  let w' = read strFloat :: softfloat
+      notes = unlines
+        [ "strFloat " <> strFloat
+        , "native " <> showBits w
+        , "soft   " <> showBits w'
+        ]
+  liftIO $ threadDelay 10000 >> putStrLn notes
+  H.footnote notes
+  bitListFinite w === bitListFinite w'
+
+showBits x = unwords [show (head x'), show e, show m]
+  where
+    x' = bitListFinite x
+    (e, m) = splitAt 8 (tail x')
 
 hot = do
-  -- runTest "" prop_equalsNativeFloat
-  let (debug, (f :: Soft.Float, leftover)) = parseFloat "0.1"
-  putStrLn $ unlines debug
+  -- main
+  -- threadDelay 1000000000
+  runTest "" $ H.property $
+    compareParsingAgainstNative @Float @Word32 @Binary32 "9223372036854775807.0"
+
+--  let (debug, (f :: Soft.Float, leftover)) = parseFloat "2.0"
+  -- putStrLn $ unlines debug
+  -- putStrLn $ showBits f
   -- print ()
 
-getStorableFloat = getStorableWord @Float @Word32
-getStorableDouble = getStorableWord @Double @Word64
+{-
+strFloat  9223372036854775807.0
+native O [I,O,O,O,O,I,I,I] [I,I,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O]
+soft   O [I,O,O,O,O,I,I,I] [I,O,I,I,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O]
+strFloat -9223372036854775808.0
+native I [I,O,I,I,I,I,I,O] [O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O]
+soft   I [I,O,I,I,I,I,I,O] [O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,This]
+-}
 
-getStorableWord :: forall from to . (Storable from, Storable to) => from -> IO to
-getStorableWord f = do
+getStoredWord :: forall from to . (Storable from, Storable to) => from -> IO to
+getStoredWord f = do
   p :: Ptr from <- malloc @from
   poke p f
   peek (castPtr p)
+
+-- * Parsing
+
+-- | Test `normalizeMantissa`, a function used in float parsing, by
+-- giving it an integer part bits and fraction part bits and testing
+-- whether exponent is correct and if initial implicit bit is dropped.
+prop_normalizeMantissa :: H.Property
+prop_normalizeMantissa = H.property $ do
+  intPartLength <- H.forAll $ Gen.integral $ Range.linear @Int 0 10
+  fracPartLength <- H.forAll $ Gen.integral $ Range.linear @Int 0 10
+  intBits' <- H.forAll $ replicateM intPartLength bit_
+  fracBits' <- H.forAll $ replicateM fracPartLength bit_
+
+  let intBits = dropWhile (== O) intBits'
+      fracBits = reverse $ dropWhile (== O) $ reverse fracBits'
+      (result, expDiff) = normalizeMantissa intBits fracBits
+
+  H.footnote $ unlines
+    [ "intBits " <> show intBits
+    , "fracBits " <> show fracBits
+    , "expDiff " <> show expDiff
+    , "result " <> show result
+    ]
+
+  let positiveExponent = length (dropZeroes intBits) - 1 === expDiff
+      negativeExponent = negate (length (takeWhile (== O) fracBits) + 1) === expDiff
+
+  if | _ : _ <- intBits                    -> do positiveExponent; result === drop 1 (intBits <> fracBits)
+     | _ : _ <- fracBits                   -> do negativeExponent; result === drop 1 (dropZeroes fracBits)
+     | []    <- intBits, []    <- fracBits -> do result === []; expDiff === 0
+
+  where
+    dropZeroes = dropWhile (== O)
 
 unitTest_floatParsing :: H.Property
 unitTest_floatParsing = unitTest $ do
@@ -193,6 +257,18 @@ spaces n = replicate n ' '
 
 randomDecimalString :: H.MonadGen m => m String
 randomDecimalString = do
-  int :: Word32 <- Gen.enumBounded
-  frac :: Word32 <- Gen.enumBounded
+  int :: Int64 <- Gen.choice
+    [ Gen.integral $ Range.linear minBound maxBound
+    , return 0
+    ]
+  frac :: Word64 <- Gen.integral $ Range.linear minBound maxBound
   return $ show int <> "." <> show frac
+  -- -- return $ show int <> "." <> show frac
+  -- return "0.1"
+
+-- generate integral value between bounds
+-- minMaxRange = Gen.choice
+--   [ Gen.integral $ Range.linear minBound maxBound
+--   , return minBound
+--   , return maxBound
+--   ]
