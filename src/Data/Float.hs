@@ -1,6 +1,6 @@
 module Data.Float where
 
-import LocalPrelude
+import LocalPrelude hiding (Float, Double)
 
 import Text.Read
 import Data.Function (on)
@@ -33,7 +33,8 @@ type Binary128  = Format    2       15      112    -- quad-precision            
 type Binary256  = Format    2       19      236    -- octuple-precision        262143
 
 type Half = Binary16
-
+type Float = Binary32
+type Double = Binary64
 
 bias :: forall e . KnownNat e => BitArray e
 bias = foldl' setBit 0 [0 .. (intVal @e) - 2]
@@ -241,10 +242,10 @@ fromIntParts int maybeFracInt =
         (m, overflow) = roundBits (intVal @m + 1) (intBits <> fracBits) :: ([Bit], Bool)
         debug = [ "<maybeFracInt>"
                 , lxs "fracBits" $ take 35 fracBits
-                , l "round to N bits" (intVal @m, intVal @m + 1)
-                , lxs "m" $ take 35 m
+                , l "round to N bits (+implicit)" (intVal @m)
+                , lxs "m" m
                 , l "overflow" overflow
-                , l "exponent initial" biasedExponent
+               , l "exponent initial" biasedExponent
                 , l "exponent +1" $ exponent + 1
                 , "</maybeFracInt>"
                 ]
@@ -254,9 +255,23 @@ fromIntParts int maybeFracInt =
              then error "overflow"
              else (m, biasedExponent + 1, debug)
         else (m, biasedExponent, debug)
+
       Nothing -> (intBits <> repeat O, biasedExponent, [])
 
     mantissa' = bitsToArrayBE $ drop 1 mantissaBits :: BitArray m
+
+normalizeMantissa :: [Bit] -> [Bit] -> ([Bit], Int)
+normalizeMantissa intBitsBE fracBitsBE
+  | null intBitsBE = dropCountZeroes 0 fracBitsBE
+  | otherwise = (intBitsBE <> fracBitsBE, max (length intBitsBE - 1) 0)
+  where
+    dropCountZeroes n xs = case xs of
+      b : bs -> case b of
+        I -> (bs, n - 1)
+        O -> dropCountZeroes (n - 1) bs
+      [] -> (xs, n)
+
+
 
 -- | Take fraction part digits as integer, convert it to bitlist. Big-endian.
 fractionPartBits :: Natural -> [Bit]

@@ -14,8 +14,12 @@ import Test.Tasty qualified as Tasty
 import Test.Tasty.Hedgehog qualified as Tasty
 
 import Data.BitArray
-import Data.Float
+import Data.Float hiding (Float, Double)
+import Data.Float qualified as Soft
 
+import Foreign.Marshal.Alloc
+import Foreign.Ptr
+import Foreign.Storable
 
 main :: IO ()
 main = Tasty.defaultMain $ Tasty.testGroup "shoftfloat"
@@ -33,10 +37,38 @@ main = Tasty.defaultMain $ Tasty.testGroup "shoftfloat"
 -- runTest :: H.Property -> IO ()
 runTest msg test = Tasty.defaultMain $ Tasty.testGroup msg [ Tasty.testProperty "test" test ]
 
+prop_equalsNativeFloat :: H.Property
+prop_equalsNativeFloat = H.property $ do
+  strFloat <- H.forAll randomDecimalString
+  w <- liftIO $ getStorableFloat $ read strFloat
+  let w' = read strFloat :: Binary32
+  H.footnote $ unlines
+    [ "strFloat " <> strFloat
+    , "native " <> showBits w
+    , "soft   " <> showBits w'
+    , "" ]
+  bitListFinite w === bitListFinite w'
+  where
+    showBits x = unwords [show (head x'), show e, show m]
+      where
+        x' = bitListFinite x
+        (e, m) = splitAt 8 (tail x')
+
+
 hot = do
-  let (debug, (f :: Half, leftover)) = parseFloat "0.1"
+  -- runTest "" prop_equalsNativeFloat
+  let (debug, (f :: Soft.Float, leftover)) = parseFloat "0.1"
   putStrLn $ unlines debug
-  print ()
+  -- print ()
+
+getStorableFloat = getStorableWord @Float @Word32
+getStorableDouble = getStorableWord @Double @Word64
+
+getStorableWord :: forall from to . (Storable from, Storable to) => from -> IO to
+getStorableWord f = do
+  p :: Ptr from <- malloc @from
+  poke p f
+  peek (castPtr p)
 
 unitTest_floatParsing :: H.Property
 unitTest_floatParsing = unitTest $ do
@@ -73,9 +105,10 @@ unitTest_floatParsing = unitTest $ do
 
 prop_parseShowRoundtripNativeFloat :: H.Property
 prop_parseShowRoundtripNativeFloat = H.property $ do
-  int :: Word32 <- H.forAll $ Gen.enumBounded
-  frac :: Word32 <- H.forAll $ Gen.enumBounded
-  let str = show int <> "." <> show frac
+  str <- H.forAll randomDecimalString
+  liftIO $ do
+    threadDelay 5000
+    putStrLn str
   show (read str :: Binary32) === show (read str :: Float)
 
 -- * Rounding
@@ -157,3 +190,9 @@ unitTest test = H.withTests 1 $ H.property test
 
 spaces :: Int -> String
 spaces n = replicate n ' '
+
+randomDecimalString :: H.MonadGen m => m String
+randomDecimalString = do
+  int :: Word32 <- Gen.enumBounded
+  frac :: Word32 <- Gen.enumBounded
+  return $ show int <> "." <> show frac
