@@ -12,6 +12,7 @@ import Data.List as Export
 import Data.Ratio as Export
 import Data.Maybe as Export
 import Data.Function as Export ((&))
+import Text.Read
 
 -- * Helpers
 
@@ -27,3 +28,8 @@ intVal = fromIntegral (integerVal @n)
 
 traceLabelShow :: Show a => String -> a -> a
 traceLabelShow label a = trace (label <> " < " <> show a <> " >") a
+
+readLabel :: Read a => String -> String -> a
+readLabel label str = case readEither str of
+  Right v -> v
+  Left msg -> error $ label <> ": value: " <> str <> ", error: " <> msg

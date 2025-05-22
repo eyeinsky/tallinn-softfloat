@@ -56,6 +56,24 @@ instance KnownNat w => Bounded (BitArray w) where
   minBound = BitArray 0
   maxBound = foldl' (\acc i -> setBit acc i) 0 [0 .. intVal @w - 1 ]
 
+instance KnownNat w => Real (BitArray w) where
+  toRational (BitArray a) = toRational a
+
+instance KnownNat w => Enum (BitArray w) where
+  toEnum = BitArray . toEnum
+  fromEnum (BitArray n) = fromEnum n
+
+instance KnownNat w => Integral (BitArray w) where
+  -- quot :: a -> a -> a
+  -- rem :: a -> a -> a
+  -- div :: a -> a -> a
+  -- mod :: a -> a -> a
+  quotRem (BitArray a) (BitArray b) = let (a', b') = quotRem a b  --  :: a -> a -> (a, a)
+    in (BitArray a', BitArray b')
+  -- divMod :: a -> a -> (a, a)
+  toInteger (BitArray n) = toInteger n -- :: a -> Integer
+  -- {-# MINIMAL quotRem, toInteger #-}
+
 boolBitChar :: Bool -> Char
 boolBitChar = \case
   True -> '1'
@@ -193,16 +211,15 @@ roundBits n bits = let
     (a, overflow) = splitAt n bits
     a' = reverse a -- little-endian
   in case overflow of
-      -- first overflow bit is zero or there are no overflow bits => truncated
+      -- first overflow bit is zero or there are no overflow bits => truncate
       [] -> (a, False)
       O : _ -> (a, False)
       I : rest -> if all (== O) rest
         then case a' of        -- it's a tie
-          I : _ -> ceiling a'  -- remainder is odds => ceiling
-          O : _ -> (a, False)  -- remainder is even => floor
-          []    -> (a, False)  -- same
-        else ceiling a'
-
+          I : _ -> ceiling a'  -- remainder is odd => round up
+          O : _ -> (a, False)  -- remainder is even => round down
+          []    -> (a, False)  -- same => round down
+        else ceiling a'        -- round up
   where
     ceiling a = let (x, y) = add1 a in (reverse x, y)
 

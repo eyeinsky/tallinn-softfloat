@@ -6,6 +6,8 @@ import Data.Int
 import Control.Monad
 import Control.Monad.IO.Class
 import Control.Concurrent
+import Control.Exception
+import GHC.TypeLits
 
 import Hedgehog ((===))
 import Hedgehog qualified as H
@@ -13,6 +15,8 @@ import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
 import Test.Tasty qualified as Tasty
 import Test.Tasty.Hedgehog qualified as Tasty
+import Text.Printf
+import Text.Read
 
 import Data.BitArray
 import Data.Float hiding (Float, Double)
@@ -24,76 +28,66 @@ import Foreign.Ptr
 import Foreign.Storable
 
 main :: IO ()
-main = Tasty.defaultMain $ Tasty.testGroup "shoftfloat"
+main = Tasty.defaultMain $ Tasty.testGroup "Softfloat"
   [ Tasty.testProperty "noop" $ H.property $ return ()
 
-  -- parsing, rendering
-  , Tasty.testProperty "unit test: float parsing" unitTest_floatParsing
+  , Tasty.testGroup "Parsing"
+    [ Tasty.testProperty "Unit tests" unitTest_floatParsing
+    , Tasty.testProperty "Rountrip against native Float" prop_parsingRountripNativeFloat
+    , Tasty.testProperty "Rountrip against native Double" prop_parsingRountripNativeDouble
+    ]
+
   -- , Tasty.testProperty "parse/show matches native floats" prop_parseShowRoundtripNativeFloat
   , Tasty.testProperty "normalize mantissa" prop_normalizeMantissa
-
-  -- parsing
-  , Tasty.testProperty
-    "Parsing floats from string results in same binary representation as native"
-    prop_parsingEquvalentToNative
 
   -- rounding
   , Tasty.testProperty "bitlist rounding unit test" unitTest_bitlistRounding
   , Tasty.testProperty "no rounding" prop_shorterValuesNeedNoRounding
   ]
 
--- runTest :: H.Property -> IO ()
-runTest msg test = Tasty.defaultMain $ Tasty.testGroup msg [ Tasty.testProperty "test" test ]
+prop_parsingRountripNativeFloat :: H.Property
+prop_parsingRountripNativeFloat = H.property $ do
+  str <- H.forAll (randomDecimalString @Soft.Float)
+  compareParsingAgainstNative @Float @Word32 @Soft.Float str
 
-prop_parsingEquvalentToNative :: H.Property
-prop_parsingEquvalentToNative = H.property $ do
-  str <- H.forAll randomDecimalString
-  compareParsingAgainstNative @Float @Word32 @Binary32 str
-  compareParsingAgainstNative @Double @Word64 @Binary64 str
-
+prop_parsingRountripNativeDouble :: H.Property
+prop_parsingRountripNativeDouble = H.withTests 200 $ H.property $ do
+  str <- H.forAll (randomDecimalString @Soft.Double)
+  compareParsingAgainstNative @Double @Word64 @Soft.Double str
 
 compareParsingAgainstNative
-  :: forall native word softfloat
-  . ( Storable native, Read native         -- native type, e.g Float, Double
-    , Storable word, FiniteBits word       -- matching word, e.g Word32, Word64
-    , FiniteBits softfloat, Read softfloat -- matching softfloat, e.g Finite 2 8 23
+  :: forall native word softfloat b e m
+  . ( Storable native, Read native, Show native            -- native type, e.g Float, Double
+    , Storable word, FiniteBits word                       -- matching word, e.g Word32, Word64
+    , FiniteBits softfloat, Read softfloat, Show softfloat, Bounded softfloat -- matching softfloat, e.g Finite 2 8 23
+    , softfloat ~ Format b e m, KnownNat e
     ) => String -> H.PropertyT IO ()
 compareParsingAgainstNative strFloat = do
-  w <- liftIO $ getStoredWord @native @word $ read strFloat
-  let w' = read strFloat :: softfloat
+  let native = readLabel "native" strFloat :: native
+  w <- liftIO $ getStoredWord @native @word native
+  let w' = readLabel "soft" strFloat :: softfloat
+      isBoundMsg
+        | w' == maxBound = " maxBound"
+        | w' == minBound = " minBound"
+        | otherwise = ""
+      integerDigits = show . length . dropWhile (== '-') . takeWhile (/= '.')
       notes = unlines
-        [ "strFloat " <> strFloat
-        , "native " <> showBits w
-        , "soft   " <> showBits w'
+        [ "strFloat " <> strFloat <> " (" <> integerDigits strFloat <> ")"
+        , "native " <> showBits (intVal @e) w <> " " <> show native
+        , "soft   " <> showBits (intVal @e) w' <> " " <> show w' <> " " <> isBoundMsg
         ]
-  liftIO $ threadDelay 10000 >> putStrLn notes
+  -- liftIO $ threadDelay 10000 >> putStrLn notes
   H.footnote notes
   bitListFinite w === bitListFinite w'
-
-showBits x = unwords [show (head x'), show e, show m]
   where
-    x' = bitListFinite x
-    (e, m) = splitAt 8 (tail x')
+    -- showBits :: Int -> Format b e m -> String
+    showBits v x = unwords [show (head x'), show e, show m]
+      where
+        x' = bitListFinite x
+        (e, m) = splitAt v (tail x')
 
-hot = do
-  -- main
-  -- threadDelay 1000000000
-  runTest "" $ H.property $
-    compareParsingAgainstNative @Float @Word32 @Binary32 "9223372036854775807.0"
-
---  let (debug, (f :: Soft.Float, leftover)) = parseFloat "2.0"
-  -- putStrLn $ unlines debug
-  -- putStrLn $ showBits f
-  -- print ()
-
-{-
-strFloat  9223372036854775807.0
-native O [I,O,O,O,O,I,I,I] [I,I,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O]
-soft   O [I,O,O,O,O,I,I,I] [I,O,I,I,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O]
-strFloat -9223372036854775808.0
-native I [I,O,I,I,I,I,I,O] [O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O]
-soft   I [I,O,I,I,I,I,I,O] [O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,O,This]
--}
+hot :: IO ()
+hot = main
 
 getStoredWord :: forall from to . (Storable from, Storable to) => from -> IO to
 getStoredWord f = do
@@ -105,7 +99,7 @@ getStoredWord f = do
 
 -- | Test `normalizeMantissa`, a function used in float parsing, by
 -- giving it an integer part bits and fraction part bits and testing
--- whether exponent is correct and if initial implicit bit is dropped.
+-- whether exponent is correct.
 prop_normalizeMantissa :: H.Property
 prop_normalizeMantissa = H.property $ do
   intPartLength <- H.forAll $ Gen.integral $ Range.linear @Int 0 10
@@ -124,11 +118,11 @@ prop_normalizeMantissa = H.property $ do
     , "result " <> show result
     ]
 
-  let positiveExponent = length (dropZeroes intBits) - 1 === expDiff
-      negativeExponent = negate (length (takeWhile (== O) fracBits) + 1) === expDiff
+  let positiveExponent = toInteger (length (dropZeroes intBits)) - 1 === expDiff
+      negativeExponent = negate (toInteger (length (takeWhile (== O) fracBits)) + 1) === expDiff
 
-  if | _ : _ <- intBits                    -> do positiveExponent; result === drop 1 (intBits <> fracBits)
-     | _ : _ <- fracBits                   -> do negativeExponent; result === drop 1 (dropZeroes fracBits)
+  if | _ : _ <- intBits                    -> do positiveExponent; result === intBits <> fracBits
+     | _ : _ <- fracBits                   -> do negativeExponent; result === dropZeroes fracBits
      | []    <- intBits, []    <- fracBits -> do result === []; expDiff === 0
 
   where
@@ -136,8 +130,8 @@ prop_normalizeMantissa = H.property $ do
 
 unitTest_floatParsing :: H.Property
 unitTest_floatParsing = unitTest $ do
-  let read' str = read str :: Binary16
-  read' "0" === Finite { sign = O, exponent = 0, mantissa = 0 } -- "0" parses as all zero field values for sign, exponent and mantissa
+  let read' str = readLabel "" str :: Binary16
+  read' "0" === Format { sign = O, exponent = 0, mantissa = 0 } -- "0" parses as all zero field values for sign, exponent and mantissa
   read' "0" === 0b0                                             -- "0" parses as all zero bytes
   read' "0" === 0                                               -- same
 
@@ -145,14 +139,14 @@ unitTest_floatParsing = unitTest $ do
   let showDescribeFloat' :: Binary16 -> (String, String)
       showDescribeFloat' = showDescribeFloat
 
-  showDescribeFloat' (read "0") === ("0.0", "positive zero")
-  showDescribeFloat' (read "-0") === ("-0.0", "negative zero")
-  showDescribeFloat' (Finite O maxBound 0) === ("inf", "positive infinity")
-  showDescribeFloat' (Finite I maxBound 0) === ("-inf", "negative infinity")
-  showDescribeFloat' (Finite O maxBound 1) === ("snan", "positive signaling nan")
-  showDescribeFloat' (Finite I maxBound 1) === ("-snan", "negative signaling nan")
-  showDescribeFloat' (Finite O maxBound (1 + signalingBound @2 @10)) === ("nan", "positive nan")
-  showDescribeFloat' (Finite I maxBound (1 + signalingBound @2 @10)) === ("-nan", "negative nan")
+  showDescribeFloat' (readLabel "" "0") === ("0.0", "positive zero")
+  showDescribeFloat' (readLabel "" "-0") === ("-0.0", "negative zero")
+  showDescribeFloat' (Format O maxBound 0) === ("inf", "positive infinity")
+  showDescribeFloat' (Format I maxBound 0) === ("-inf", "negative infinity")
+  showDescribeFloat' (Format O maxBound 1) === ("snan", "positive signaling nan")
+  showDescribeFloat' (Format I maxBound 1) === ("-snan", "negative signaling nan")
+  showDescribeFloat' (Format O maxBound (1 + signalingBound @2 @10)) === ("nan", "positive nan")
+  showDescribeFloat' (Format I maxBound (1 + signalingBound @2 @10)) === ("-nan", "negative nan")
 
   let f12 = read' "1.2"
   f12 === fromBits @Integer 0b0011110011001101
@@ -162,18 +156,25 @@ unitTest_floatParsing = unitTest $ do
   f13 === fromBits @Integer 0b0011110100110011
   show f13 === "1.2998046875"
 
+  let f32 str = compareParsingAgainstNative @Float @Word32 @Binary32 str
+  f32 "2.0"
+  f32 "9223372036854775807.0"
+  f32 "0.1"
+  f32 "-9145438377800105983.0"
+  f32 "340282356779733661637539395458142568448"
+
   -- Signaling NaNs' payload
-  getPayload (Finite O maxBound 123 :: Binary16) === Just (123 :: BitArray 9)
-  getPayload (Finite O maxBound 0b1001 :: Binary16) === Just (0b1001 :: BitArray 9)
-  getPayload (Finite O maxBound (1 + signalingBound @2 @10) :: Binary16) === Nothing
+  getPayload (Format O maxBound 123 :: Binary16) === Just (123 :: BitArray 9)
+  getPayload (Format O maxBound 0b1001 :: Binary16) === Just (0b1001 :: BitArray 9)
+  getPayload (Format O maxBound (1 + signalingBound @2 @10) :: Binary16) === Nothing
 
 prop_parseShowRoundtripNativeFloat :: H.Property
 prop_parseShowRoundtripNativeFloat = H.property $ do
-  str <- H.forAll randomDecimalString
+  str <- H.forAll (randomDecimalString @Soft.Float)
   liftIO $ do
     threadDelay 5000
     putStrLn str
-  show (read str :: Binary32) === show (read str :: Float)
+  show (readLabel "" str :: Binary32) === show (readLabel "" str :: Float)
 
 -- * Rounding
 
@@ -238,13 +239,10 @@ prop_longerValuesRoundCorrectly = H.property $ do
         extraDigit === False
     | otherwise -> H.footnote "This never happens." >> H.failure
 
--- * Values
-
--- | Half, parsed from 0.1 by float.exposed
-fe_0p1 = fromIntegerBits 0b0_01011_1001100110 :: Half
-
-
 -- * Helpers
+
+runTest :: String -> H.Property -> IO ()
+runTest msg test = Tasty.defaultMain $ Tasty.testGroup msg [ Tasty.testProperty msg test ]
 
 bit_ :: H.MonadGen m => m Bit
 bit_ = boolBit <$> Gen.bool
@@ -252,23 +250,35 @@ bit_ = boolBit <$> Gen.bool
 unitTest :: H.PropertyT IO () -> H.Property
 unitTest test = H.withTests 1 $ H.property test
 
-spaces :: Int -> String
-spaces n = replicate n ' '
-
-randomDecimalString :: H.MonadGen m => m String
+-- | Generate random decimal number as string, both negative and
+-- positive and with or without the fraction part. E.g -9.2, 1, 8, 90842083.0
+randomDecimalString
+  :: forall t b e m m'
+   . (t ~ Format b e m, KnownNat b, KnownNat e, KnownNat m, H.MonadGen m')
+  => m' String
 randomDecimalString = do
-  int :: Int64 <- Gen.choice
-    [ Gen.integral $ Range.linear minBound maxBound
-    , return 0
-    ]
-  frac :: Word64 <- Gen.integral $ Range.linear minBound maxBound
-  return $ show int <> "." <> show frac
-  -- -- return $ show int <> "." <> show frac
-  -- return "0.1"
+  addSign <- Gen.bool
+  let minus x = '-' : show x
+      plus x = show x
+      sign :: Natural -> String
+      sign x = (if addSign then "-" else "") <> show x
 
--- generate integral value between bounds
--- minMaxRange = Gen.choice
---   [ Gen.integral $ Range.linear minBound maxBound
---   , return minBound
---   , return maxBound
---   ]
+      maxNat = fromIntegral $ floatInt (maxBound :: t)
+      minNat = fromIntegral $ abs $ floatInt (minBound :: t)
+
+  int :: String <- Gen.choice
+    [ fmap sign  $ Gen.integral $ Range.linear 0 maxNat -- big numbers
+    , fmap sign  $ Gen.integral $ Range.linear 0 1000   -- small numbers
+    , fmap sign  $ return (maxNat + 1000000000000000000000000000000000000000000) -- overflow
+    , fmap plus  $ return maxNat -- max bound
+    , fmap minus $ return minNat -- min bound
+    , fmap sign  $ return 0
+    , fmap sign  $ return 1
+    ]
+
+  addFraction <- Gen.bool
+  if addFraction
+    then do
+      frac :: Word64 <- Gen.integral $ Range.linear minBound maxBound
+      return $ int <> "." <> show frac
+    else return int
