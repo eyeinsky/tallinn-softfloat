@@ -1,17 +1,15 @@
+{-# LANGUAGE TypeFamilies #-}
 module Data.Float where
 
 import LocalPrelude hiding (Float, Double)
 
 import Text.Read
-import Data.Function (on)
-import Data.Coerce
 import Data.Proxy
 import GHC.TypeLits
 import Data.Kind
 import Data.Char hiding (Format)
 import Data.Bits
-import Data.Ratio
-import Text.Printf
+import Data.Word
 
 import Data.BitArray as BitArray
 
@@ -36,6 +34,11 @@ type Half = Binary16
 type Float = Binary32
 type Double = Binary64
 
+type family MatchingWord a where
+  MatchingWord Half = Word16
+  MatchingWord Float = Word32
+  MatchingWord Double = Word64
+
 -- * Bias
 
 -- | Bias is always positive.
@@ -46,10 +49,6 @@ bias = foldl' setBit 0 [0 .. (intVal @e) - 2]
 -- bias. Result is Integer as it can be negative.
 unbiasedExponent :: forall s e m . Format s e m -> Integer
 unbiasedExponent (Format _s e _m) = toInteger e - toInteger (bias @e)
-
-addBias' :: forall e . BitArray e -> BitArray e
-addBias' (BitArray n) = BitArray (n + biasN)
-  where BitArray biasN = bias @e
 
 addBias :: forall ew . KnownNat ew => Integer -> BitArray ew
 addBias e = BitArray $ if e < 0
@@ -119,57 +118,11 @@ instance (KnownNat b, KnownNat e, KnownNat m) => Bits (Format b e m) where
       exponentWidth = intVal @e
       i' = i - mantissaWidth
 
-instance (KnownNat b, KnownNat e, KnownNat m) => Num (Format b e m) where
-  (+) = u -- :: a -> a -> a
-  (-) = u --  :: a -> a -> a
-  f1@(Format s1 e1 m1) * f2@(Format s2 e2 m2) = trace (unlines
-    [ ""
-    , l "e1, unbiased" $ unbiasedExponent f1
-    , l "e2, unbiased" $ unbiasedExponent f2
-    , l "m1'" m1'
-    , l "m2'" m2'
-    , l "m1+1" m1''
-    , l "m2+1" m2''
-    , l "m'" m'
-    , l "m'" $ (BitArray m' :: BitArray 8)
-    , l "m'bitlist" $ m'bitlist
-    , l "m'bitlist" $ reverse $ drop (ix * 2) $ reverse m'bitlist
-    , l "e'shifts" $ e'shifts
-    , l "e'new" e'new
-    , l "e'new'biased" e'new'biased
-    , "float: " <> showFloatBits float
-    ]) $
-    float
-    where
-      BitArray m1' = m1
-      BitArray m2' = m2
-      ix = intVal @m
-      m1'' = setBit m1' ix
-      m2'' = setBit m2' ix
-      m' = m1'' * m2''
-      m'bitlist = bitList m'
-
-      e'shifts = toInteger $ length (drop (ix * 2) m'bitlist) - 1
-
-      e'new = unbiasedExponent f1 + unbiasedExponent f2 + e'shifts
-
-      e'new'biased = addBias e'new
-      m'' = bitsToArrayBE $ tail $ m'bitlist
-
-      float = Format (s1 `xor` s2) e'new'biased m''
-
-  negate f = f { sign = negate (sign f) }
-  abs f = f { sign = O }
-  signum f = (one @b) { sign = sign f }
-  fromInteger i = let (_, (e, m)) = fromIntParts (fromInteger i) 0
-    in Format (boolBit $ i < 0) e m
-
-fromIntegerBits :: forall b e m . (KnownNat b, KnownNat e, KnownNat m) => Integer -> Format b e m
-fromIntegerBits = fromBits @Integer
-
+-- | Read a float from a value having a binary representation, i.e, a @Bits@ instance.
+-- TODO add tests
 fromBits
-  :: forall b' b e m . (Bits b', KnownNat b, KnownNat e, KnownNat m)
-  => b' -> Format b e m
+  :: forall bits b e m . (Bits bits, KnownNat b, KnownNat e, KnownNat m)
+  => bits -> Format b e m
 fromBits source = Format
   { sign = if testBit source (mw + ew) then I else O
   , exponent = integerBits source mw (mw + ew)
@@ -184,6 +137,16 @@ fromBits source = Format
         step acc (ix0, ix1) = if testBit source ix0 then setBit acc ix1 else acc
         mapping :: [(Int, Int)]
         mapping = zip [from .. (to - 1) ] [0..]
+
+instance (KnownNat b, KnownNat e, KnownNat m) => Num (Format b e m) where
+  (+) = u -- :: a -> a -> a
+  (-) = u --  :: a -> a -> a
+  f1 * f2 = snd $ multiply f1 f2
+  negate f = f { sign = negate (sign f) }
+  abs f = f { sign = O }
+  signum f = (one @b) { sign = sign f }
+  fromInteger i = let (_, (e, m)) = fromIntParts (fromInteger i) 0
+    in Format (boolBit $ i < 0) e m
 
 l label a = label <> ": " <> show a
 lxs label cap xs = let
@@ -293,11 +256,31 @@ instance (KnownNat b, KnownNat e, KnownNat m) => Fractional (Format b e m) where
 mantissaBits :: Format b q c -> (String, Int)
 mantissaBits (Format s e m) = let mbits = showPosIntBits $ bitArrayInt m in (mbits, length mbits)
 
-multiply :: forall b e m . Format b e m -> Format b e m -> Format b e m
-multiply f1@(Format s1 e1 m1) f2@(Format s2 e2 m2) = Format s e undefined
+multiply :: forall b e m . Format b e m -> Format b e m -> ([String], Format b e m)
+multiply f1@(Format s1 e1 m1) f2@(Format s2 e2 m2) = (debug, zero)
   where
-    s = if s1 == s2 then O else I
-    e = undefined -- m_exponent f1 f2 (bias @e)
+    debug =
+      [ ""
+      , l "result" float
+      ]
+
+    BitArray m1' = m1
+    BitArray m2' = m2
+    ix = intVal @m
+    m1'' = setBit m1' ix
+    m2'' = setBit m2' ix
+    m' = m1'' * m2''
+    m'bitlist = bitList m'
+
+    e'shifts = toInteger $ length (drop (ix * 2) m'bitlist) - 1
+
+    e'new = unbiasedExponent f1 + unbiasedExponent f2 + e'shifts
+
+    e'new'biased = addBias e'new
+    m'' = bitsToArrayBE $ tail $ m'bitlist
+
+    float = Format @b @e @m (s1 `xor` s2) e'new'biased m''
+
 
 -- * Show
 
@@ -325,6 +308,17 @@ showDescribeFloat float@(Format sign e m)
     signWord = Just $ case sign of O -> "positive"; I -> "negative"
     (siganling, sg) = if testBit m (intVal @m - 1) then (Nothing, "") else (Just "signaling", "s")
 
+describeFloat :: Format b e m -> String
+describeFloat f = snd $ showDescribeFloat f
+
+showFloatBits :: forall b e m . Format b e m -> String
+showFloatBits (Format sign e m) = intercalate "_" [[bitChar sign], bitStringFinite e, bitStringFinite m]
+
+showFloatBits_ :: Format b e m -> String
+showFloatBits_ = filter (/= '_') . showFloatBits
+
+-- * Unsorted
+
 -- | Should this be in Fractional class?
 floatToRational :: forall b e m . Format b e m -> Rational
 floatToRational f@(Format sign exponent mantissa) =
@@ -345,25 +339,16 @@ floatInt f = div n d
     n = numerator r
     d = denominator r
 
--- *
+-- * NaN signaling
 
 signalingBound :: forall b m . (KnownNat b, KnownNat m) => BitArray m
 signalingBound = fromInteger $ (intVal @b)^(intVal @m - 1)
 
-getPayload :: forall b e m . KnownNat (m - 1) => Format b e m -> Maybe (BitArray (m - 1))
-getPayload (Format _ _ (BitArray m)) = if not $ testBit m ix
+snanPayload :: forall b e m . KnownNat (m - 1) => Format b e m -> Maybe (BitArray (m - 1))
+snanPayload (Format _ _ (BitArray m)) = if not $ testBit m ix
   then Just $ BitArray $ clearBit m ix
   else Nothing
   where ix = intVal @m - 1
-
-describeFloat :: Format b e m -> String
-describeFloat f = snd $ showDescribeFloat f
-
-showFloatBits :: forall b e m . Format b e m -> String
-showFloatBits (Format sign e m) = intercalate "_" [[bitChar sign], bitStringFinite e, bitStringFinite m]
-
-showFloatBits_ :: Format b e m -> String
-showFloatBits_ = filter (/= '_') . showFloatBits
 
 -- * Predefined
 
@@ -374,3 +359,15 @@ one = Format { sign = O, exponent = bias @e, mantissa = 0 }
 
 zero :: forall b e m . (KnownNat b, KnownNat e, KnownNat m) => Format b e m
 zero = Format { sign = O, exponent = 0, mantissa = 0 }
+
+-- | Positive infinity: exponent is all-ones, mantissa is all-zeroes.
+inf :: forall b e m . (KnownNat b, KnownNat e, KnownNat m) => Format b e m
+inf = Format { sign = O, exponent = maxBound, mantissa = 0 }
+
+-- | NaN is like infinity, but with a non-zero mantissa.
+nan :: forall b e m . (KnownNat b, KnownNat e, KnownNat m) => Format b e m
+nan = (inf @b @e @m) { mantissa = setBit 0 (intVal @m - 1) }
+
+-- | Signaling NaN has most significant bit zero, the rest holds argument data.
+snan :: forall b e m m' . (KnownNat b, KnownNat e, KnownNat m, KnownNat m', m' <= m - 1) => BitArray m' -> Format b e m
+snan (BitArray data_) = (inf @b @e @m) { mantissa = BitArray data_ }

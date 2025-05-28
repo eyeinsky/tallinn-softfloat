@@ -1,3 +1,5 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE KindSignatures #-}
 module Main where
 
 import LocalPrelude
@@ -35,6 +37,14 @@ main = Tasty.defaultMain $ Tasty.testGroup "Softfloat"
     [ Tasty.testProperty "Unit tests" unitTest_floatParsing
     , Tasty.testProperty "Rountrip against native Float" prop_parsingRountripNativeFloat
     , Tasty.testProperty "Rountrip against native Double" prop_parsingRountripNativeDouble
+    , Tasty.testProperty "From binary" prop_parsingFromBinary
+    ]
+
+  , Tasty.testGroup "Operations"
+    [ Tasty.testProperty "Multiplication" prop_multiplication
+    , Tasty.testProperty "Division" prop_division
+    , Tasty.testProperty "Addition" prop_addition
+    , Tasty.testProperty "Subtraction" prop_subtraction
     ]
 
   -- , Tasty.testProperty "parse/show matches native floats" prop_parseShowRoundtripNativeFloat
@@ -44,6 +54,8 @@ main = Tasty.defaultMain $ Tasty.testGroup "Softfloat"
   , Tasty.testProperty "bitlist rounding unit test" unitTest_bitlistRounding
   , Tasty.testProperty "no rounding" prop_shorterValuesNeedNoRounding
   ]
+
+-- * Parsing
 
 prop_parsingRountripNativeFloat :: H.Property
 prop_parsingRountripNativeFloat = H.property $ do
@@ -85,17 +97,6 @@ compareParsingAgainstNative strFloat = do
       where
         x' = bitListFinite x
         (e, m) = splitAt v (tail x')
-
-hot :: IO ()
-hot = main
-
-getStoredWord :: forall from to . (Storable from, Storable to) => from -> IO to
-getStoredWord f = do
-  p :: Ptr from <- malloc @from
-  poke p f
-  peek (castPtr p)
-
--- * Parsing
 
 -- | Test `normalizeMantissa`, a function used in float parsing, by
 -- giving it an integer part bits and fraction part bits and testing
@@ -164,9 +165,22 @@ unitTest_floatParsing = unitTest $ do
   f32 "340282356779733661637539395458142568448"
 
   -- Signaling NaNs' payload
-  getPayload (Format O maxBound 123 :: Binary16) === Just (123 :: BitArray 9)
-  getPayload (Format O maxBound 0b1001 :: Binary16) === Just (0b1001 :: BitArray 9)
-  getPayload (Format O maxBound (1 + signalingBound @2 @10) :: Binary16) === Nothing
+  snanPayload (Format O maxBound 123 :: Binary16) === Just (123 :: BitArray 9)
+  snanPayload (Format O maxBound 0b1001 :: Binary16) === Just (0b1001 :: BitArray 9)
+  snanPayload (Format O maxBound (1 + signalingBound @2 @10) :: Binary16) === Nothing
+
+prop_parsingFromBinary :: H.Property
+prop_parsingFromBinary = unitTest $ do
+  let fromBits' :: Integer -> Soft.Format 2 3 4
+      fromBits' = fromBits
+
+  show (nan @2 @3 @4) === "nan"
+  show (snan @2 @3 @4 (0b101 :: BitArray 3)) === "snan"
+  show (fromBits' 0b0_111_0000) === "inf"
+  show (fromBits' 0b1_111_0000) === "-inf"
+  show (fromBits' 0b0_111_1000) === "nan"
+  show (fromBits' 0b0_111_0100) === "snan"
+  snanPayload (fromBits' 0b0_111_0101) === Just 0b101
 
 prop_parseShowRoundtripNativeFloat :: H.Property
 prop_parseShowRoundtripNativeFloat = H.property $ do
@@ -175,6 +189,41 @@ prop_parseShowRoundtripNativeFloat = H.property $ do
     threadDelay 5000
     putStrLn str
   show (readLabel "" str :: Binary32) === show (readLabel "" str :: Float)
+
+-- * Operations
+
+hot :: IO ()
+hot = runTest "" prop_parsingFromBinary -- prop_multiplication
+
+fromNative :: Float -> Soft.Float
+fromNative = u
+
+prop_multiplication :: H.Property
+-- prop_multiplication = H.property $ do
+prop_multiplication = unitTest $ do
+  a :: Soft.Float <- H.forAll $ anyFloat2
+  b :: Soft.Float <- H.forAll $ anyFloat2
+  let
+    a = fromInteger 2 :: Soft.Format 2 3 4
+    b = fromInteger 2 :: Soft.Format 2 3 4
+    (debug, res) = multiply a b
+  liftIO $ do
+    threadDelay 1000
+    putStrLn $ unlines debug
+
+  return ()
+
+prop_addition :: H.Property
+prop_addition = H.property $ do
+  return ()
+
+prop_subtraction :: H.Property
+prop_subtraction = H.property $ do
+  return ()
+
+prop_division :: H.Property
+prop_division = H.property $ do
+  return ()
 
 -- * Rounding
 
@@ -240,6 +289,33 @@ prop_longerValuesRoundCorrectly = H.property $ do
     | otherwise -> H.footnote "This never happens." >> H.failure
 
 -- * Helpers
+
+anyFloat :: forall m . H.MonadGen m => m Soft.Float
+anyFloat = do
+  str <- randomDecimalString @Soft.Float
+  return (readLabel "anyFloat" str)
+
+anyFloat2
+  :: forall f w (b :: Natural) (e :: Natural) (m :: Natural) m'
+   . ( KnownNat b, KnownNat e, KnownNat m
+     , Soft.MatchingWord f ~ w, f ~ Format b e m
+     , H.MonadGen m'
+     , Enum w, Bounded w, Bits w)
+  => m' f
+anyFloat2 = do
+  fromBits <$> (Gen.enumBounded @m' @w)
+
+-- yyy
+
+
+
+
+-- | Read value of type @from@ as type @to@ via pointer. Used to cast
+-- any C type to a binary type (Word).
+getStoredWord :: forall from to . (Storable from, Storable to) => from -> IO to
+getStoredWord f = do
+  ptr :: Ptr from <- malloc @from
+  poke ptr f *> peek (castPtr ptr) <* free ptr
 
 runTest :: String -> H.Property -> IO ()
 runTest msg test = Tasty.defaultMain $ Tasty.testGroup msg [ Tasty.testProperty msg test ]

@@ -11,6 +11,10 @@ type T = Natural
 data BitArray (w :: Natural) where
   BitArray :: KnownNat w => { bitArrayInt :: T } -> BitArray w
 
+-- | TODO think about the design of this
+upcast :: forall a b . (KnownNat a, KnownNat b, a <= b) => BitArray a -> BitArray b
+upcast (BitArray a) = BitArray @b a
+
 mkOp2 :: (T -> T -> T) -> BitArray a -> BitArray a -> BitArray a
 mkOp2 op (BitArray a) (BitArray b) = BitArray $ op a b
 
