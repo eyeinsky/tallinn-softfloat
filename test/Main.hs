@@ -76,7 +76,7 @@ compareParsingAgainstNative
     ) => String -> H.PropertyT IO ()
 compareParsingAgainstNative strFloat = do
   let native = readLabel "native" strFloat :: native
-  w <- liftIO $ getStoredWord @native @word native
+  w <- liftIO $ viaStorable @native @word native
   let w' = readLabel "soft" strFloat :: softfloat
       isBoundMsg
         | w' == maxBound = " maxBound"
@@ -193,22 +193,18 @@ prop_parseShowRoundtripNativeFloat = H.property $ do
 -- * Operations
 
 hot :: IO ()
-hot = runTest "" prop_parsingFromBinary -- prop_multiplication
-
-fromNative :: Float -> Soft.Float
-fromNative = u
+hot = runTest "" prop_multiplication
 
 prop_multiplication :: H.Property
 -- prop_multiplication = H.property $ do
 prop_multiplication = unitTest $ do
-  a :: Soft.Float <- H.forAll $ anyFloat2
-  b :: Soft.Float <- H.forAll $ anyFloat2
+  a <- return (read "2.25" :: Soft.Format 2 3 4) -- H.forAll $ anyFloat2
+  b <- return (read "2.25" :: Soft.Format 2 3 4) -- H.forAll $ anyFloat2
   let
-    a = fromInteger 2 :: Soft.Format 2 3 4
-    b = fromInteger 2 :: Soft.Format 2 3 4
     (debug, res) = multiply a b
   liftIO $ do
     threadDelay 1000
+    putStrLn $ show a <> " * " <> show b <> " = " <> show res
     putStrLn $ unlines debug
 
   return ()
@@ -306,16 +302,6 @@ anyFloat2 = do
   fromBits <$> (Gen.enumBounded @m' @w)
 
 -- yyy
-
-
-
-
--- | Read value of type @from@ as type @to@ via pointer. Used to cast
--- any C type to a binary type (Word).
-getStoredWord :: forall from to . (Storable from, Storable to) => from -> IO to
-getStoredWord f = do
-  ptr :: Ptr from <- malloc @from
-  poke ptr f *> peek (castPtr ptr) <* free ptr
 
 runTest :: String -> H.Property -> IO ()
 runTest msg test = Tasty.defaultMain $ Tasty.testGroup msg [ Tasty.testProperty msg test ]

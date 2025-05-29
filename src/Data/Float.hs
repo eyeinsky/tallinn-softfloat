@@ -11,6 +11,10 @@ import Data.Char hiding (Format)
 import Data.Bits
 import Data.Word
 
+import Foreign.Marshal.Alloc
+import Foreign.Ptr
+import Foreign.Storable
+
 import Data.BitArray as BitArray
 
 
@@ -256,31 +260,62 @@ instance (KnownNat b, KnownNat e, KnownNat m) => Fractional (Format b e m) where
 mantissaBits :: Format b q c -> (String, Int)
 mantissaBits (Format s e m) = let mbits = showPosIntBits $ bitArrayInt m in (mbits, length mbits)
 
+ba :: forall w . KnownNat w => Natural -> BitArray w
+ba n = BitArray n
+
 multiply :: forall b e m . Format b e m -> Format b e m -> ([String], Format b e m)
-multiply f1@(Format s1 e1 m1) f2@(Format s2 e2 m2) = (debug, zero)
+multiply f1@(Format s1 e1 m1) f2@(Format s2 e2 m2) = (debug, float)
   where
     debug =
       [ ""
+      , l "f1" $ showFloatBits f1
+      , l "f2" $ showFloatBits f2
+
+      , l "f1 m" m1
+      , l "f2 m" m2
+
+      , l "f1 m'" (BitArray m1'' :: BitArray 5)
+      , l "f2 m'" (BitArray m2'' :: BitArray 5)
+
+      , l "significand" $ ba @9 m'
+      , l "mantissa" $ ba @9 m''
+      , l "highest set bit" highestSetBit'
+      , l "shifts" shifts
+      , l "mantissa, normalized" $ bitList m'''
+      , l "e1" $ unbiasedExponent f1
+      , l "e2" $ unbiasedExponent f2
+      , l "e'new" e'new
+      , l "result bits" $ showFloatBits float
       , l "result" float
       ]
 
+    -- get inner mantissa natural
     BitArray m1' = m1
     BitArray m2' = m2
+
+    -- set implicit first bit
     ix = intVal @m
     m1'' = setBit m1' ix
     m2'' = setBit m2' ix
-    m' = m1'' * m2''
-    m'bitlist = bitList m'
 
-    e'shifts = toInteger $ length (drop (ix * 2) m'bitlist) - 1
+    m' = m1'' * m2'' -- account for nans, infs
+    highestSetBit' = fromMaybe (error "no highest set bit") $ highestSetBit m' -- at most 2 * m
+    shifts = highestSetBit' - ix
+    m'' = clearBit m' highestSetBit'
+    m''' = shiftR (clearBit m' highestSetBit') shifts
 
-    e'new = unbiasedExponent f1 + unbiasedExponent f2 + e'shifts
+    e'new = unbiasedExponent f1 + unbiasedExponent f2 -- + fromIntegral shifts
 
     e'new'biased = addBias e'new
-    m'' = bitsToArrayBE $ tail $ m'bitlist
 
-    float = Format @b @e @m (s1 `xor` s2) e'new'biased m''
+    float = Format @b @e @m (s1 `xor` s2) e'new'biased $ BitArray m'''
 
+highestSetBit :: Natural -> Maybe Int
+highestSetBit n = Just $ floor $ logBase 2 $ fromIntegral n
+
+divide :: (KnownNat b, KnownNat e, KnownNat m) => Format b e m -> Format b e m -> Format b e m
+divide a b
+  | 0 <- b = inf -- plus sign from either
 
 -- * Show
 
@@ -371,3 +406,12 @@ nan = (inf @b @e @m) { mantissa = setBit 0 (intVal @m - 1) }
 -- | Signaling NaN has most significant bit zero, the rest holds argument data.
 snan :: forall b e m m' . (KnownNat b, KnownNat e, KnownNat m, KnownNat m', m' <= m - 1) => BitArray m' -> Format b e m
 snan (BitArray data_) = (inf @b @e @m) { mantissa = BitArray data_ }
+
+-- * Conversions
+
+-- | Read value of type @from@ as type @to@ via pointer. Used to cast
+-- any C type to a binary type (Word).
+viaStorable :: forall from to . (Storable from, Storable to) => from -> IO to
+viaStorable f = do
+  ptr :: Ptr from <- malloc @from
+  poke ptr f *> peek (castPtr ptr) <* free ptr
