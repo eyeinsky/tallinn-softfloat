@@ -15,7 +15,8 @@ import Foreign.Marshal.Alloc
 import Foreign.Ptr
 import Foreign.Storable
 
-import Data.BitArray as BitArray
+import Data.BitArray as BitArray hiding (multiply)
+import Data.BitArray qualified as BitArray
 
 
 type Format :: Natural -> Natural -> Natural -> Type
@@ -69,9 +70,11 @@ asBinaryFraction (BitArray m :: BitArray m) = foldl step 0 $ zip bitlist [1..]
     bitlist = reverse $ map (\n -> testBit m n) [0 .. (fromIntegral (natVal @m Proxy) - 1)]
 
 -- | significand = 1 + mantissa, idea from here: https://en.wikipedia.org/wiki/Significand
--- significand :: Format b e m -> BitArray.T -- TODO: BitArray (e + 1)
--- significand float@Format{} = bitArrayInt (1 + mantissa float)
--- TODO: this was wrong, fix it
+-- significand :: forall b e m . (m <= m + 1, KnownNat (m + 1)) => Format b e m -> BitArray (m + 1)
+-- significand Format{mantissa} = setBit (upcast mantissa) (intVal @m)
+
+significand :: forall b e m . KnownNat m => Format b e m -> Natural
+significand f = setBit (bitArrayInt $ mantissa f) (intVal @m)
 
 -- * Instances
 
@@ -145,7 +148,7 @@ fromBits source = Format
 instance (KnownNat b, KnownNat e, KnownNat m) => Num (Format b e m) where
   (+) = u -- :: a -> a -> a
   (-) = u --  :: a -> a -> a
-  f1 * f2 = snd $ multiply f1 f2
+  f1 * f2 = snd $ (multiply @b @e @m) f1 f2
   negate f = f { sign = negate (sign f) }
   abs f = f { sign = O }
   signum f = (one @b) { sign = sign f }
@@ -263,25 +266,22 @@ mantissaBits (Format s e m) = let mbits = showPosIntBits $ bitArrayInt m in (mbi
 ba :: forall w . KnownNat w => Natural -> BitArray w
 ba n = BitArray n
 
-multiply :: forall b e m . Format b e m -> Format b e m -> ([String], Format b e m)
-multiply f1@(Format s1 e1 m1) f2@(Format s2 e2 m2) = (debug, float)
+multiply
+  :: forall b e m {m'}
+   . ()
+  => Format b e m -> Format b e m -> ([String], Format b e m)
+multiply f1@(Format s1 e1 m1) f2@(Format s2 e2 m2) = (debug, zero)
   where
     debug =
       [ ""
       , l "f1" $ showFloatBits f1
       , l "f2" $ showFloatBits f2
 
-      , l "f1 m" m1
-      , l "f2 m" m2
-
-      , l "f1 m'" (BitArray m1'' :: BitArray 5)
-      , l "f2 m'" (BitArray m2'' :: BitArray 5)
-
-      , l "significand" $ ba @9 m'
-      , l "mantissa" $ ba @9 m''
+      , l "significand" $ ba @9 s
+      , l "mantissa" $ ba @9 m
       , l "highest set bit" highestSetBit'
       , l "shifts" shifts
-      , l "mantissa, normalized" $ bitList m'''
+      , l "mantissa, normalized" $ bitList m'
       , l "e1" $ unbiasedExponent f1
       , l "e2" $ unbiasedExponent f2
       , l "e'new" e'new
@@ -289,26 +289,22 @@ multiply f1@(Format s1 e1 m1) f2@(Format s2 e2 m2) = (debug, float)
       , l "result" float
       ]
 
-    -- get inner mantissa natural
-    BitArray m1' = m1
-    BitArray m2' = m2
-
     -- set implicit first bit
     ix = intVal @m
-    m1'' = setBit m1' ix
-    m2'' = setBit m2' ix
+    s = significand f1 * significand f2 -- todo: account for nans, infs
+    highestSetBit' = fromMaybe (error "no highest set bit") $ highestSetBit s -- at most 2 * m
 
-    m' = m1'' * m2'' -- account for nans, infs
-    highestSetBit' = fromMaybe (error "no highest set bit") $ highestSetBit m' -- at most 2 * m
     shifts = highestSetBit' - ix
-    m'' = clearBit m' highestSetBit'
-    m''' = shiftR (clearBit m' highestSetBit') shifts
+    m = clearBit s highestSetBit'
+    m' = shiftR (clearBit m highestSetBit') shifts
 
     e'new = unbiasedExponent f1 + unbiasedExponent f2 -- + fromIntegral shifts
 
     e'new'biased = addBias e'new
 
-    float = Format @b @e @m (s1 `xor` s2) e'new'biased $ BitArray m'''
+    float = Format @b @e @m (s1 `xor` s2) e'new'biased $ BitArray m'
+
+
 
 highestSetBit :: Natural -> Maybe Int
 highestSetBit n = Just $ floor $ logBase 2 $ fromIntegral n

@@ -20,7 +20,7 @@ import Test.Tasty.Hedgehog qualified as Tasty
 import Text.Printf
 import Text.Read
 
-import Data.BitArray
+import Data.BitArray hiding (multiply)
 import Data.Float hiding (Float, Double)
 import Data.Float qualified as Soft
 import Data.Bits
@@ -76,7 +76,7 @@ compareParsingAgainstNative
     ) => String -> H.PropertyT IO ()
 compareParsingAgainstNative strFloat = do
   let native = readLabel "native" strFloat :: native
-  w <- liftIO $ viaStorable @native @word native
+  w :: word <- liftIO $ viaStorable @native @word native
   let w' = readLabel "soft" strFloat :: softfloat
       isBoundMsg
         | w' == maxBound = " maxBound"
@@ -198,14 +198,35 @@ hot = runTest "" prop_multiplication
 prop_multiplication :: H.Property
 -- prop_multiplication = H.property $ do
 prop_multiplication = unitTest $ do
-  a <- return (read "2.25" :: Soft.Format 2 3 4) -- H.forAll $ anyFloat2
-  b <- return (read "2.25" :: Soft.Format 2 3 4) -- H.forAll $ anyFloat2
+  w1 :: Word32 <- H.forAll $ Gen.enumBounded
+  w2 :: Word32 <- H.forAll $ Gen.enumBounded
   let
-    (debug, res) = multiply a b
-  liftIO $ do
-    threadDelay 1000
-    putStrLn $ show a <> " * " <> show b <> " = " <> show res
-    putStrLn $ unlines debug
+    sf1 = fromBits w1 :: Soft.Float
+    sf2 = fromBits w2 :: Soft.Float
+    sf = sf1 * sf2
+
+  nf1 <- liftIO $ viaStorable @_ @Float w1
+  nf2 <- liftIO $ viaStorable @_ @Float w2
+  let nf = nf1 * nf2
+  nfw <- liftIO $ viaStorable @Float @Word32 nf
+
+  H.footnote $ unlines
+    [ l "w1" w1
+    , l "w2" w2
+    , l "sf" (sf1, sf2, sf)
+    , l "nf" (nf1, nf2, nf, binaryLiteral nfw)
+    ]
+
+  bitListFinite (sf1 * sf2) === bitListFinite nfw
+
+  -- a <- return (read "2.25" :: Soft.Format 2 3 6) -- H.forAll $ anyFloat2
+  -- b <- return (read "2.25" :: Soft.Format 2 3 6) -- H.forAll $ anyFloat2
+  -- let
+  --   (debug, res) = multiply a b
+  -- liftIO $ do
+  --   threadDelay 1000
+  --   putStrLn $ show a <> " * " <> show b <> " = " <> show res
+  --   putStrLn $ unlines debug
 
   return ()
 

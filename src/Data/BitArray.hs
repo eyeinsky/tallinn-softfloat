@@ -15,7 +15,7 @@ data BitArray (w :: Natural) where
 upcast :: forall a b . (KnownNat a, KnownNat b, a <= b) => BitArray a -> BitArray b
 upcast (BitArray a) = BitArray @b a
 
-mkOp2 :: (T -> T -> T) -> BitArray a -> BitArray a -> BitArray a
+mkOp2 :: KnownNat c => (T -> T -> T) -> BitArray a -> BitArray b -> BitArray c
 mkOp2 op (BitArray a) (BitArray b) = BitArray $ op a b
 
 mkOp1 :: (T -> T) -> BitArray a -> BitArray a
@@ -90,6 +90,11 @@ showIntBits a = if a < 0
 
 showPosIntBits :: T -> String
 showPosIntBits a = showIntAtBase 2 intToDigit a ""
+
+-- * Operations
+
+multiply :: KnownNat (a + b) => BitArray a -> BitArray b -> BitArray (a + b)
+multiply = mkOp2 (*)
 
 -- * Helpers
 
