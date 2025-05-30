@@ -198,11 +198,19 @@ bitStringFinite = map bitChar . bitListFinite
 toBitBoolListN :: Bits a => a -> Int -> [Bool]
 toBitBoolListN a max = map (\i -> testBit a i) [max, max - 1 .. 0]
 
-prettyBitList :: FiniteBits a => a -> String
-prettyBitList a = map (\b -> if b then '1' else '0') $ dropWhile not $ toBitBoolListN a (finiteBitSize a)
-
+-- | Print value having a FiniteBits instance as binary literal, e.g 0b0110..
 binaryLiteral :: FiniteBits a => a -> String
-binaryLiteral a = "0b" <> prettyBitList a
+binaryLiteral a = "0b" <> map bitChar (bitListFinite a)
+
+binaryLiteralChunked :: FiniteBits a => [Int] -> a -> String
+binaryLiteralChunked ixs a = "0b" <> go ixs (bitListFinite a)
+  where
+    go xs bs = case xs of
+      x : xs' -> let
+        (bs0, bs1) = splitAt x bs
+        tail' = if null bs1 then "" else "_" <> go xs' bs1
+        in map bitChar bs0 <> tail'
+      [] -> map bitChar bs
 
 -- | Top bits of @a@ as [Bool], reversed
 topBits :: FiniteBits a => a -> Int -> [Bool]

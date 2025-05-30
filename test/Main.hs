@@ -1,15 +1,16 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE OverloadedStrings #-}
 module Main where
 
 import LocalPrelude
 import Data.Word
-import Data.Int
 import Control.Monad
 import Control.Monad.IO.Class
 import Control.Concurrent
-import Control.Exception
+-- import Control.Exception
 import GHC.TypeLits
+import System.IO.Unsafe
 
 import Hedgehog ((===))
 import Hedgehog qualified as H
@@ -17,17 +18,23 @@ import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
 import Test.Tasty qualified as Tasty
 import Test.Tasty.Hedgehog qualified as Tasty
-import Text.Printf
-import Text.Read
+-- import Text.Printf
+-- import Text.Read
 
 import Data.BitArray hiding (multiply)
 import Data.Float hiding (Float, Double)
 import Data.Float qualified as Soft
 import Data.Bits
 
-import Foreign.Marshal.Alloc
-import Foreign.Ptr
 import Foreign.Storable
+
+--
+-- import System.Random.SplitMix
+-- import Test.QuickCheck.Random
+-- mkSeed :: Word64 -> Word64 -> QCGen
+-- mkSeed a b = QCGen $ seedSMGen a b
+
+
 
 main :: IO ()
 main = Tasty.defaultMain $ Tasty.testGroup "Softfloat"
@@ -192,43 +199,53 @@ prop_parseShowRoundtripNativeFloat = H.property $ do
 
 -- * Operations
 
+
+
 hot :: IO ()
-hot = runTest "" prop_multiplication
+-- hot = runTest "" prop_multiplication
+-- hot = H.recheckAt (H.Seed 14321414145475802858 9379888143028483585) "1:b3Db2AcAb2A8b2A31" prop_multiplication
+hot = do
+  let
+    a = fromBits @Word32 0b0_10000000_00000000110101101000101 :: Soft.Float
+    b = fromBits @Word32 0b0_10000000_00000001100110010100101 :: Soft.Float
+    (debug, res) = multiply a b
+  liftIO $ do
+    threadDelay 1000
+    putStrLn $ show a <> " * " <> show b <> " = " <> show res
+    putStrLn $ unlines debug
 
 prop_multiplication :: H.Property
--- prop_multiplication = H.property $ do
-prop_multiplication = unitTest $ do
-  w1 :: Word32 <- H.forAll $ Gen.enumBounded
-  w2 :: Word32 <- H.forAll $ Gen.enumBounded
-  let
-    sf1 = fromBits w1 :: Soft.Float
-    sf2 = fromBits w2 :: Soft.Float
-    sf = sf1 * sf2
-
-  nf1 <- liftIO $ viaStorable @_ @Float w1
-  nf2 <- liftIO $ viaStorable @_ @Float w2
+prop_multiplication = H.property $ do
+-- prop_multiplication = unitTest $ do
+  (sf1, nf1) <- H.forAll softNativePair
+  (sf2, nf2) <- H.forAll softNativePair
+  let sf = sf1 * sf2
   let nf = nf1 * nf2
   nfw <- liftIO $ viaStorable @Float @Word32 nf
 
   H.footnote $ unlines
-    [ l "w1" w1
-    , l "w2" w2
-    , l "sf" (sf1, sf2, sf)
-    , l "nf" (nf1, nf2, nf, binaryLiteral nfw)
+    [ l "arg1" (bl sf1, bl sf1 == bl (toBits nf1))
+    , l "arg2" (bl sf2, bl sf2 == bl (toBits nf2))
     ]
 
-  bitListFinite (sf1 * sf2) === bitListFinite nfw
+  bl sf === bl nfw
+
+  return ()
+
+  where
+
+-- nativeFloatFromSoft s = fold s
+
+bl a = binaryLiteralChunked [1, 8, 23] a
+
+n_inf :: Float
+n_inf = 1/0
+
+n_nan :: Float
+n_nan = 0/0
 
   -- a <- return (read "2.25" :: Soft.Format 2 3 6) -- H.forAll $ anyFloat2
   -- b <- return (read "2.25" :: Soft.Format 2 3 6) -- H.forAll $ anyFloat2
-  -- let
-  --   (debug, res) = multiply a b
-  -- liftIO $ do
-  --   threadDelay 1000
-  --   putStrLn $ show a <> " * " <> show b <> " = " <> show res
-  --   putStrLn $ unlines debug
-
-  return ()
 
 prop_addition :: H.Property
 prop_addition = H.property $ do
@@ -276,7 +293,7 @@ prop_longerValuesRoundCorrectly = H.property $ do
   overflowLength <- H.forAll $ Gen.integral $ Range.linear @Int 0 10
   overflow <- H.forAll $ replicateM overflowLength bit_
   let value = bits <> overflow
-      res@(rounded, extraDigit) = roundBits roundToLength value
+      (rounded, extraDigit) = roundBits roundToLength value
 
   H.footnote $ "extraDigit " <> show extraDigit
   H.footnote $ "rounded value " <> show rounded
@@ -291,7 +308,7 @@ prop_longerValuesRoundCorrectly = H.property $ do
       remainderIsEven = case bits of
         [] -> True
         _ -> case reverse bits of
-          O : rest -> True
+          O : _rest -> True
           _ -> False
       mustRoundUp = overflowIsMoreThanHalf || overflowIsTie && not remainderIsEven
 
@@ -327,6 +344,20 @@ anyFloat2 = do
 runTest :: String -> H.Property -> IO ()
 runTest msg test = Tasty.defaultMain $ Tasty.testGroup msg [ Tasty.testProperty msg test ]
 
+softNativePair :: (H.MonadGen m') => m' (Soft.Float, Float)
+softNativePair = do
+  soft <- normalSoftfloat
+  let native = unsafePerformIO $ viaStorable (toBits soft)
+  return (soft, native)
+
+-- | Generate a regular finite float, which is not a special value nor a subnormal finite float.
+normalSoftfloat :: forall m' b e m . (H.MonadGen m', KnownNat b, KnownNat e, KnownNat m) => m' (Format b e m)
+normalSoftfloat =
+  Format
+    <$> bit_
+    <*> Gen.integral (Range.linear (bias @e + 1) maxExponent)
+    <*> Gen.integral (Range.linear 0 maxBound)
+
 bit_ :: H.MonadGen m => m Bit
 bit_ = boolBit <$> Gen.bool
 
@@ -354,7 +385,7 @@ randomDecimalString = do
     , fmap sign  $ Gen.integral $ Range.linear 0 1000   -- small numbers
     , fmap sign  $ return (maxNat + 1000000000000000000000000000000000000000000) -- overflow
     , fmap plus  $ return maxNat -- max bound
-    , fmap minus $ return minNat -- min bound
+    , fmap minus $ return (minNat :: Integer) -- min bound
     , fmap sign  $ return 0
     , fmap sign  $ return 1
     ]
