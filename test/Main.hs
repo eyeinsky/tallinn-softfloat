@@ -202,8 +202,12 @@ prop_parseShowRoundtripNativeFloat = H.property $ do
 
 -- * Operations
 hot :: IO ()
--- hot = H.recheckAt (H.Seed 14321414145475802858 9379888143028483585) "1:b3Db2AcAb2A8b2A31" prop_multiplication
-hot = do
+-- hot = runTest "" prop_multiplication
+-- (hot :: IO ()) = H.recheckAt (H.Seed 4936066334461211705 2110126111092947499) "72:aCaCaIh22" prop_multiplication
+-- hot = H.recheckAt (H.Seed 1810217614510917368 7538698885017751741) "1:a" prop_multiplication
+-- hot = H.recheckAt (H.Seed 499228071421766153 13311263923328427387) "1:" prop_multiplication
+hot = H.recheckAt (H.Seed 9873241771532503570 17835145012515769455) "2:" prop_multiplication
+(hot' :: IO ()) = do
   let
     a = fromBits @Word32 0b0_10000000_00000000110101101000101 :: Soft.Float
     b = fromBits @Word32 0b0_10000000_00000001100110010100101 :: Soft.Float
@@ -215,17 +219,20 @@ hot = do
 
 prop_multiplication :: H.Property
 prop_multiplication = H.property $ do
+-- prop_multiplication = H.withTests 10000 $ H.property $ do
 -- prop_multiplication = unitTest $ do
   (sf1, nf1) <- H.forAll softNativePair
   (sf2, nf2) <- H.forAll softNativePair
-  let sf = sf1 * sf2
+  -- let sf = sf1 * sf2
+  let (debug, sf) = multiply sf1 sf2
   let nf = nf1 * nf2
   nfw <- liftIO $ viaStorable @Float @Word32 nf
 
-  -- H.footnote $ unlines
-  --   [ l "arg1" (bl sf1, bl sf1 == bl (toBits nf1))
-  --   , l "arg2" (bl sf2, bl sf2 == bl (toBits nf2))
-  --   ]
+  let notes = unlines $ debug <>
+        [ l "nf" nf
+        ]
+  liftIO $ threadDelay 10000 >> putStrLn notes
+  -- H.footnote notes
 
   binaryNatural sf === binaryNatural nfw
 
@@ -336,7 +343,7 @@ normalSoftfloat :: forall m' b e m . (H.MonadGen m', KnownNat b, KnownNat e, Kno
 normalSoftfloat =
   Format
     <$> bit_
-    <*> Gen.integral (Range.linear (bias @e + 1) maxExponent)
+    <*> Gen.integral (Range.linear 0 maxBound)
     <*> Gen.integral (Range.linear 0 maxBound)
 
 -- | Generate random decimal number as string, both negative and

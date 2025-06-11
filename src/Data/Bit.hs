@@ -112,7 +112,7 @@ add1 bits' = case bits' of
 
 -- * Data.Bits.Extra
 
--- | Return last @n@ bits of argument.
+-- | Return value with last @n@ bits from argument.
 suffix :: Bits a => Int -> a -> a
 suffix n a = foldl' step zeroBits [0 .. (n - 1)]
   where step acc i = if testBit a i then setBit acc i else acc
@@ -163,15 +163,29 @@ binaryLiteralChunked ixs a = go ixs (dropWhile (== O) $ bitListIntegral a)
       [] -> map bitChar bs
 
 prettyBinFrac :: forall a . (Bits a) => Int -> a -> String
-prettyBinFrac n a = go (shiftR a n) <> "." <> frac
+prettyBinFrac n a = prettyBin (shiftR a n) <> "." <> frac
   where
-    go rest = boolBitChar (testBit rest 0) : let
-        rest' = shiftR rest 1 -- TODO: how is popCount available for non-FinteBits types
-      in if popCount rest' == 0
-         then []
-         else go rest'
-
     frac = reverse $ map bitChar $ take n $ bitList $ suffix n a
+
+prettyBin :: Bits a => a -> String
+prettyBin a = reverse $ prettyBinLE a
+
+prettyBinLE :: Bits a => a -> String
+prettyBinLE rest = boolBitChar (testBit rest 0) : let
+  rest' = shiftR rest 1 -- TODO: how is popCount available for non-FinteBits types
+  in if popCount rest' == 0
+  then []
+  else prettyBinLE rest'
+
+-- TODO make result BitArray as it shows better?
+bitsNatural :: forall a . Bits a => a -> Natural
+bitsNatural a = go a zeroBits 0
+  where
+    go :: a -> Natural -> Int -> Natural
+    go rest acc ix
+      | popCount rest == 0 = acc
+      | testBit rest 0 = go (shiftR rest 1) (setBit acc ix) (ix + 1)
+      | otherwise = go (shiftR rest 1) acc (ix + 1)
 
 -- ** Rounding
 

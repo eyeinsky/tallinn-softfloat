@@ -47,6 +47,9 @@ type family MatchingWord a where
 bias :: forall e . KnownNat e => BitArray e
 bias = foldl' setBit 0 [0 .. (intVal @e) - 2]
 
+unbias :: forall e . KnownNat e => BitArray e -> Integer
+unbias e = toInteger $ e - (bias @e)
+
 -- | Get unbiased exponent: take float's raw exponent and subtract its
 -- bias. Result is Integer as it can be negative.
 unbiasedExponent :: forall s e m . (KnownNat e, KnownNat m) => Format s e m -> Integer
@@ -283,11 +286,11 @@ xorSign :: Bit -> Bit -> Format b e m -> Format b e m
 xorSign s1 s2 f = f{sign = xor s1 s2 }
 
 multiply :: forall b e m . Format b e m -> Format b e m -> ([String],  Format b e m)
-multiply f1@(Format s1 _e1 _m1) f2@(Format s2 _e2 _m2)
+multiply f1@(Format s1 e1 _m1) f2@(Format s2 e2 _m2)
   -- | False = ([], addSign (nan @b @e @m))
   | isNan f1 || isNan f2 = ([], addSign nan)                       -- nan * _ = nan
   | isInf f1 && f2 == 0 || isInf f2 && f1 == 0 = ([], addSign nan) -- 0 * inf = nan
-  | f1 == 0 || f2 == 0 = ([], addSign 0)                           -- 0 * _   = 0
+  | isZero f1 || isZero f2 = ([], addSign 0)                       -- 0 * _   = 0
   | otherwise = (debug, addSign float)
   where
     addSign = xorSign s1 s2
@@ -297,14 +300,25 @@ multiply f1@(Format s1 _e1 _m1) f2@(Format s2 _e2 _m2)
     s = significand f1 * significand f2 -- todo: account for nans, infs
     hsb = fromMaybe (error "no highest set bit") $ highestSetBit s -- at most 2 * m
 
-    -- HERE
-    shifts = hsb - ix
-    m = clearBit s hsb
-    m' = shiftR (clearBit m hsb) shifts
+    (s', m, expAdd) = if hsb == (intVal @m * 2)
+      then let
+        s' = roundEven ix s
+        m = clearBit s' ix
+        in (s', m, 0)
+      else let
+        s' = roundEven (ix + 1) s
+        m = clearBit s' (ix + 1)
+        in (s', m, 1)
 
+    e = unbiasedExponent f1 + unbiasedExponent f2 + expAdd
+    eBiased = addBias e
+    sign = s1 `xor` s2
+    float | eBiased > (maxExponent @e) = Format sign maxBound 0
+          | otherwise = Format @b @e @m sign eBiased $ BitArray m
 
     debug =
       [ ""
+      , show f1 <> " * " <> show f2
       , l "f1" $ showFloatBits f1
       , l "f2" $ showFloatBits f2
       , ""
@@ -312,27 +326,20 @@ multiply f1@(Format s1 _e1 _m1) f2@(Format s2 _e2 _m2)
       , "SIGNIFICAND:"
       , l "s1" $ prettyBinFrac (intVal @m) $ significand f1
       , l "s2" $ prettyBinFrac (intVal @m) $ significand f2
-      , l "significand" s
       , l "significand" $ prettyBinFrac (intVal @m * 2) s
+      , l "s'" $ prettyBinFrac (intVal @m) s'
+      , l "m" $ prettyBinFrac (intVal @m) m
+      , l "expAdd" $ expAdd
       , ""
 
-      , l "e1" $ (unbiasedExponent f1, unbiasedExponent f1 - intVal @m)
-      , l "e2" $ (unbiasedExponent f2, unbiasedExponent f2 - intVal @m)
-
-      , l "mantissa   " $ ba @64 m
-      , l "highest set bit" hsb
-      , l "shifts" shifts
-      , l "mantissa, normalized" $ bitListIntegral m'
-      , l "e'new" e'new
+      , l "e1" (unbiasedExponent f1, addBias @e $ unbiasedExponent f1)
+      , l "e2" (unbiasedExponent f2, addBias @e $ unbiasedExponent f2)
+      , l "e" e -- , addBias @e e)
+--      , l "eBiased" $ bitArrayInt eBiased
+      , l "maxExponent" $ bitArrayInt (maxExponent @e)
       , l "result bits" $ showFloatBits float
-      -- , l "result" float
+      , l "result" float
       ]
-
-    e'new = unbiasedExponent f1 + unbiasedExponent f2 -- + fromIntegral shifts
-
-    e'new'biased = addBias e'new
-
-    float = Format @b @e @m (s1 `xor` s2) e'new'biased $ BitArray m'
 
 highestSetBit :: Natural -> Maybe Int
 highestSetBit n = Just $ floor $ logBase (2 :: Native.Double) $ fromIntegral n
@@ -357,7 +364,7 @@ showDescribeFloat float@(Format sign e m)
   | maxBound == e  = case m of
       -- infinity: exponent all ones, mantissa all zeroes
       0 -> (s <> "inf", ws [signWord, Just "infinity"])
-       -- NaN: exponent is all ones, mantissa not all zeroes; mantussa greater than signalingBound is a signaling NaN
+       -- NaN: exponent is all ones, mantissa not all zeroes; mantissa greater than signalingBound is a signaling NaN
       _ -> (s <> sg <> "nan", ws [signWord, siganling, Just "nan"])
   | otherwise      = (viaRational, "regular float: " <> show float)
   where
@@ -433,6 +440,7 @@ qnan = nan
 snan :: forall b e m m' . (KnownNat b, KnownNat e, KnownNat m, KnownNat m', m' <= m - 1) => BitArray m' -> Format b e m
 snan (BitArray data_) = (inf @b @e @m) { mantissa = BitArray data_ }
 
+-- * Predicates
 
 isNan :: Format b e m -> Bool
 isNan Format{exponent, mantissa} = exponent == maxBound && mantissa /= 0
@@ -442,3 +450,8 @@ isInf Format{exponent, mantissa} = exponent == maxBound && mantissa == 0
 
 isSubnormal :: Format b e m -> Bool
 isSubnormal Format{exponent} = exponent == 0
+
+isZero :: Format b e m -> Bool
+isZero = \case
+  Format _ 0 0 -> True
+  _ -> False
