@@ -4,13 +4,14 @@
 module Main where
 
 import LocalPrelude
+import Prelude qualified as Native (Float, Double)
 import Data.Word
 import Control.Monad
 import Control.Monad.IO.Class
 import Control.Concurrent
--- import Control.Exception
 import GHC.TypeLits
 import System.IO.Unsafe
+import Foreign.Storable
 
 import Hedgehog ((===))
 import Hedgehog qualified as H
@@ -18,27 +19,26 @@ import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
 import Test.Tasty qualified as Tasty
 import Test.Tasty.Hedgehog qualified as Tasty
--- import Text.Printf
--- import Text.Read
 
 import Data.BitArray hiding (multiply)
 import Data.Float hiding (Float, Double)
 import Data.Float qualified as Soft
 import Data.Bits
 
-import Foreign.Storable
+import Main_DataBits (bit_, unitTest, runTest, runTests)
+import Main_DataBits qualified
 
---
 -- import System.Random.SplitMix
 -- import Test.QuickCheck.Random
 -- mkSeed :: Word64 -> Word64 -> QCGen
 -- mkSeed a b = QCGen $ seedSMGen a b
 
 
-
 main :: IO ()
 main = Tasty.defaultMain $ Tasty.testGroup "Softfloat"
   [ Tasty.testProperty "noop" $ H.property $ return ()
+
+  , Tasty.testGroup "Data.Bits" Main_DataBits.tests
 
   , Tasty.testGroup "Parsing"
     [ Tasty.testProperty "Unit tests" unitTest_floatParsing
@@ -138,13 +138,13 @@ prop_normalizeMantissa = H.property $ do
 
 unitTest_floatParsing :: H.Property
 unitTest_floatParsing = unitTest $ do
-  let read' str = readLabel "" str :: Binary16
+  let read' str = readLabel "" str :: Soft.Half
   read' "0" === Format { sign = O, exponent = 0, mantissa = 0 } -- "0" parses as all zero field values for sign, exponent and mantissa
   read' "0" === 0b0                                             -- "0" parses as all zero bytes
   read' "0" === 0                                               -- same
 
   -- monomorphized `showDescribeFloat`
-  let showDescribeFloat' :: Binary16 -> (String, String)
+  let showDescribeFloat' :: Soft.Half -> (String, String)
       showDescribeFloat' = showDescribeFloat
 
   showDescribeFloat' (readLabel "" "0") === ("0.0", "positive zero")
@@ -164,7 +164,7 @@ unitTest_floatParsing = unitTest $ do
   f13 === fromBits @Integer 0b0011110100110011
   show f13 === "1.2998046875"
 
-  let f32 str = compareParsingAgainstNative @Float @Word32 @Binary32 str
+  let f32 str = compareParsingAgainstNative @Native.Float @Word32 @Soft.Float str
   f32 "2.0"
   f32 "9223372036854775807.0"
   f32 "0.1"
@@ -172,9 +172,9 @@ unitTest_floatParsing = unitTest $ do
   f32 "340282356779733661637539395458142568448"
 
   -- Signaling NaNs' payload
-  snanPayload (Format O maxBound 123 :: Binary16) === Just (123 :: BitArray 9)
-  snanPayload (Format O maxBound 0b1001 :: Binary16) === Just (0b1001 :: BitArray 9)
-  snanPayload (Format O maxBound (1 + signalingBound @2 @10) :: Binary16) === Nothing
+  snanPayload (Format O maxBound 123 :: Soft.Half) === Just (123 :: BitArray 9)
+  snanPayload (Format O maxBound 0b1001 :: Soft.Half) === Just (0b1001 :: BitArray 9)
+  snanPayload (Format O maxBound (1 + signalingBound @2 @10) :: Soft.Half) === Nothing
 
 prop_parsingFromBinary :: H.Property
 prop_parsingFromBinary = unitTest $ do
@@ -195,14 +195,13 @@ prop_parseShowRoundtripNativeFloat = H.property $ do
   liftIO $ do
     threadDelay 5000
     putStrLn str
-  show (readLabel "" str :: Binary32) === show (readLabel "" str :: Float)
+  show (readLabel "" str :: Soft.Float) === show (readLabel "" str :: Float)
+
+
+-- hot = runTests "" Main_DataBits.tests
 
 -- * Operations
-
-
-
 hot :: IO ()
--- hot = runTest "" prop_multiplication
 -- hot = H.recheckAt (H.Seed 14321414145475802858 9379888143028483585) "1:b3Db2AcAb2A8b2A31" prop_multiplication
 hot = do
   let
@@ -223,29 +222,14 @@ prop_multiplication = H.property $ do
   let nf = nf1 * nf2
   nfw <- liftIO $ viaStorable @Float @Word32 nf
 
-  H.footnote $ unlines
-    [ l "arg1" (bl sf1, bl sf1 == bl (toBits nf1))
-    , l "arg2" (bl sf2, bl sf2 == bl (toBits nf2))
-    ]
+  -- H.footnote $ unlines
+  --   [ l "arg1" (bl sf1, bl sf1 == bl (toBits nf1))
+  --   , l "arg2" (bl sf2, bl sf2 == bl (toBits nf2))
+  --   ]
 
-  bl sf === bl nfw
-
-  return ()
-
-  where
-
--- nativeFloatFromSoft s = fold s
+  binaryNatural sf === binaryNatural nfw
 
 bl a = binaryLiteralChunked [1, 8, 23] a
-
-n_inf :: Float
-n_inf = 1/0
-
-n_nan :: Float
-n_nan = 0/0
-
-  -- a <- return (read "2.25" :: Soft.Format 2 3 6) -- H.forAll $ anyFloat2
-  -- b <- return (read "2.25" :: Soft.Format 2 3 6) -- H.forAll $ anyFloat2
 
 prop_addition :: H.Property
 prop_addition = H.property $ do
@@ -341,28 +325,19 @@ anyFloat2 = do
 
 -- yyy
 
-runTest :: String -> H.Property -> IO ()
-runTest msg test = Tasty.defaultMain $ Tasty.testGroup msg [ Tasty.testProperty msg test ]
-
 softNativePair :: (H.MonadGen m') => m' (Soft.Float, Float)
 softNativePair = do
   soft <- normalSoftfloat
   let native = unsafePerformIO $ viaStorable (toBits soft)
   return (soft, native)
 
--- | Generate a regular finite float, which is not a special value nor a subnormal finite float.
+-- | Generate a regular finite float, i., not a special value (nan, inf) nor a subnormal finite float.
 normalSoftfloat :: forall m' b e m . (H.MonadGen m', KnownNat b, KnownNat e, KnownNat m) => m' (Format b e m)
 normalSoftfloat =
   Format
     <$> bit_
     <*> Gen.integral (Range.linear (bias @e + 1) maxExponent)
     <*> Gen.integral (Range.linear 0 maxBound)
-
-bit_ :: H.MonadGen m => m Bit
-bit_ = boolBit <$> Gen.bool
-
-unitTest :: H.PropertyT IO () -> H.Property
-unitTest test = H.withTests 1 $ H.property test
 
 -- | Generate random decimal number as string, both negative and
 -- positive and with or without the fraction part. E.g -9.2, 1, 8, 90842083.0

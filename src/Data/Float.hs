@@ -10,11 +10,7 @@ import Data.Kind
 import Data.Char hiding (Format)
 import Data.Bits
 import Data.Word
-import System.IO.Unsafe
 
-import Foreign.Marshal.Alloc
-import Foreign.Ptr
-import Foreign.Storable
 
 import Data.BitArray as BitArray hiding (multiply)
 -- import Data.BitArray qualified as BitArray
@@ -30,15 +26,12 @@ data Format b q c where
        } -> Format b e m
 
 --                       base exponent mantissa                                  emax
-type Binary16   = Format    2        5       10    -- half-precision               15
-type Binary32   = Format    2        8       23    -- single-precision            127
-type Binary64   = Format    2       11       52    -- double-precision           1023
+type Half       = Format    2        5       10    -- half-precision               15
+type Float      = Format    2        8       23    -- single-precision            127
+type Double     = Format    2       11       52    -- double-precision           1023
 type Binary128  = Format    2       15      112    -- quad-precision            16383
 type Binary256  = Format    2       19      236    -- octuple-precision        262143
 
-type Half = Binary16
-type Float = Binary32
-type Double = Binary64
 
 type family MatchingWord a where
   MatchingWord Half = Word16
@@ -74,9 +67,6 @@ asBinaryFraction (BitArray m :: BitArray m) = foldl step 0 $ zip bitlist [(1 :: 
     bitlist = reverse $ map (\n -> testBit m n) [0 .. (intVal @m - 1)]
 
 -- | significand = 1 + mantissa, idea from here: https://en.wikipedia.org/wiki/Significand
--- significand :: forall b e m . (m <= m + 1, KnownNat (m + 1)) => Format b e m -> BitArray (m + 1)
--- significand Format{mantissa} = setBit (upcast mantissa) (intVal @m)
-
 significand :: forall b e m . (KnownNat e, KnownNat m) => Format b e m -> Natural
 significand = snd . exponentSignificand
 
@@ -217,7 +207,7 @@ fromIntParts
 fromIntParts 0 0 = (["fromIntParts (0, 0)"], (0, 0))
 fromIntParts int fracInt = (debug, (biasedExponent_, bitsToArrayBE mantissaBits :: BitArray m))
   where
-    intBits = bitList int
+    intBits = bitListIntegral int
     fracBits = fractionPartBits fracInt :: [Bit]
     (mantissa, exp) = normalizeMantissa intBits fracBits
     biasedExp = addBias exp :: BitArray e
@@ -302,34 +292,41 @@ multiply f1@(Format s1 _e1 _m1) f2@(Format s2 _e2 _m2)
   where
     addSign = xorSign s1 s2
 
+    -- set implicit first bit
+    ix = intVal @m
+    s = significand f1 * significand f2 -- todo: account for nans, infs
+    hsb = fromMaybe (error "no highest set bit") $ highestSetBit s -- at most 2 * m
+
+    -- HERE
+    shifts = hsb - ix
+    m = clearBit s hsb
+    m' = shiftR (clearBit m hsb) shifts
+
+
     debug =
       [ ""
       , l "f1" $ showFloatBits f1
       , l "f2" $ showFloatBits f2
-      , l "s1" $ ba @24 $ significand f1
-      , l "s2" $ ba @24 $ significand f2
+      , ""
+
+      , "SIGNIFICAND:"
+      , l "s1" $ prettyBinFrac (intVal @m) $ significand f1
+      , l "s2" $ prettyBinFrac (intVal @m) $ significand f2
+      , l "significand" s
+      , l "significand" $ prettyBinFrac (intVal @m * 2) s
+      , ""
+
       , l "e1" $ (unbiasedExponent f1, unbiasedExponent f1 - intVal @m)
       , l "e2" $ (unbiasedExponent f2, unbiasedExponent f2 - intVal @m)
 
-      , l "significand" $ ba @64 s
       , l "mantissa   " $ ba @64 m
-      , l "highest set bit" highestSetBit'
+      , l "highest set bit" hsb
       , l "shifts" shifts
-      , l "mantissa, normalized" $ bitList m'
+      , l "mantissa, normalized" $ bitListIntegral m'
       , l "e'new" e'new
       , l "result bits" $ showFloatBits float
       -- , l "result" float
       ]
-
-    -- set implicit first bit
-    ix = intVal @m
-    s = significand f1 * significand f2 -- todo: account for nans, infs
-
-    highestSetBit' = fromMaybe (error "no highest set bit") $ highestSetBit s -- at most 2 * m
-
-    shifts = highestSetBit' - ix
-    m = clearBit s highestSetBit'
-    m' = shiftR (clearBit m highestSetBit') shifts
 
     e'new = unbiasedExponent f1 + unbiasedExponent f2 -- + fromIntegral shifts
 
@@ -445,21 +442,3 @@ isInf Format{exponent, mantissa} = exponent == maxBound && mantissa == 0
 
 isSubnormal :: Format b e m -> Bool
 isSubnormal Format{exponent} = exponent == 0
-
--- * Conversions
-
--- | Read value of type @from@ as type @to@ via pointer. Used to cast
--- any C type to a binary type (Word).
-viaStorable :: forall from to . (Storable from, Storable to) => from -> IO to
-viaStorable f = do
-  ptr :: Ptr from <- malloc @from
-  poke ptr f *> peek (castPtr ptr) <* free ptr
-
-instance Bits Native.Float where
-  testBit f ix = testBit (unsafePerformIO $ viaStorable @_ @(MatchingWord Native.Float) f) ix
-instance Bits Native.Double where
-  testBit f ix = testBit (unsafePerformIO $ viaStorable @_ @(MatchingWord Native.Double) f) ix
-instance FiniteBits Native.Float where
-  finiteBitSize _ = 32
-instance FiniteBits Native.Double where
-  finiteBitSize _ = 64
