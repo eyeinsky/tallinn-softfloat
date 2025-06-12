@@ -72,8 +72,8 @@ unitTest test = H.withTests 1 $ H.property test
 bit_ :: H.MonadGen m => m Bit
 bit_ = boolBit <$> Gen.bool
 
-runTest :: String -> H.Property -> IO ()
-runTest msg test = Tasty.defaultMain $ Tasty.testGroup msg [ Tasty.testProperty msg test ]
+runTest :: H.Property -> IO ()
+runTest test = Tasty.defaultMain $ Tasty.testGroup "runTest" [ Tasty.testProperty "runTest" test ]
 
-runTests :: String -> [Tasty.TestTree] -> IO ()
-runTests msg tests = Tasty.defaultMain $ Tasty.testGroup msg tests
+runTests :: [Tasty.TestTree] -> IO ()
+runTests tests = Tasty.defaultMain $ Tasty.testGroup "runTests" tests

@@ -55,12 +55,28 @@ unbias e = toInteger $ e - (bias @e)
 unbiasedExponent :: forall s e m . (KnownNat e, KnownNat m) => Format s e m -> Integer
 unbiasedExponent = fst . exponentSignificand
 
-addBias :: forall ew . KnownNat ew => Integer -> BitArray ew
+data WidthResult a
+  = Overflow
+  | Result a
+  | Underflow Natural
+  deriving Show
+
+-- | Add bias to exponent @e@, indicate both under- or overflow
+addBias_ :: forall e . KnownNat e => Integer -> WidthResult (BitArray e)
+addBias_ e
+  | eb <= 0 = Underflow $ fromIntegral $ abs eb
+  | eb > fromIntegral (maxExponent :: BitArray e) = Overflow
+  | otherwise = Result $ fromIntegral $ abs eb
+  where
+    eb = e + fromIntegral (bias @e) :: Integer
+
+-- | Add bias to exponent @e@. Nothing means underflow.
+addBias :: forall e . KnownNat e => Integer -> BitArray e
 addBias e = BitArray $ if e < 0
   then biasN - fromIntegral (abs e)
   else biasN + fromIntegral e
   where
-    BitArray biasN = bias @ew
+    BitArray biasN = bias @e
 
 -- | Get the binary fraction of a float, i.e the 1/2 + 1/4 + 1/8 part
 asBinaryFraction :: BitArray m -> Rational
@@ -286,57 +302,75 @@ xorSign :: Bit -> Bit -> Format b e m -> Format b e m
 xorSign s1 s2 f = f{sign = xor s1 s2 }
 
 multiply :: forall b e m . Format b e m -> Format b e m -> ([String],  Format b e m)
-multiply f1@(Format s1 e1 _m1) f2@(Format s2 e2 _m2)
-  -- | False = ([], addSign (nan @b @e @m))
+multiply f1@(Format sign1 _ _m1) f2@(Format sign2 _ _m2)
   | isNan f1 || isNan f2 = ([], addSign nan)                       -- nan * _ = nan
   | isInf f1 && f2 == 0 || isInf f2 && f1 == 0 = ([], addSign nan) -- 0 * inf = nan
   | isZero f1 || isZero f2 = ([], addSign 0)                       -- 0 * _   = 0
   | otherwise = (debug, addSign float)
   where
-    addSign = xorSign s1 s2
-
-    -- set implicit first bit
+    addSign = xorSign sign1 sign2
+    sign = sign1 `xor` sign2
     ix = intVal @m
-    s = significand f1 * significand f2 -- todo: account for nans, infs
-    hsb = fromMaybe (error "no highest set bit") $ highestSetBit s -- at most 2 * m
 
-    (s', m, expAdd) = if hsb == (intVal @m * 2)
-      then let
-        s' = roundEven ix s
-        m = clearBit s' ix
-        in (s', m, 0)
-      else let
-        s' = roundEven (ix + 1) s
+    s0 = significand f1 * significand f2
+    hsb = fromMaybe (error "no highest set bit") $ highestSetBit s0
+
+    -- exponent
+    e0 = unbiasedExponent f1 + unbiasedExponent f2
+
+    expAdd = not $ hsb == (intVal @m * 2)
+    (s1, m, e) = if expAdd
+      then let -- exp gained a bit
+        s' = roundEven (ix + 1) s0
         m = clearBit s' (ix + 1)
-        in (s', m, 1)
+        in (s', m, e0 - 1)
+      else let -- regular
+        s' = roundEven ix s0
+        m = clearBit s' ix
+        in (s', m, e0)
 
-    e = unbiasedExponent f1 + unbiasedExponent f2 + expAdd
-    eBiased = addBias e
-    sign = s1 `xor` s2
-    float | eBiased > (maxExponent @e) = Format sign maxBound 0
-          | otherwise = Format @b @e @m sign eBiased $ BitArray m
+    eBiasResult = addBias_ e
+
+    (float, s2) = case eBiasResult of
+      Overflow -> (Format sign maxBound 0, 0)
+      Underflow underflow ->
+        if underflow > intVal @m
+        then (Format sign 0 0, 0)
+        else
+          let
+          s2 = roundEven (fromIntegral underflow + ix + 1) s0
+          in (Format sign 0 $ BitArray s2, s2)
+
+      Result eBiased ->
+
+        (Format @b @e @m sign eBiased $ BitArray m, m)
 
     debug =
       [ ""
       , show f1 <> " * " <> show f2
       , l "f1" $ showFloatBits f1
       , l "f2" $ showFloatBits f2
-      , ""
 
-      , "SIGNIFICAND:"
+      , "\nEXPONENT"
+      , l "e1" (unbiasedExponent f1, addBias @e $ unbiasedExponent f1)
+      , l "e2" (unbiasedExponent f2, addBias @e $ unbiasedExponent f2)
+      , l "e0" e0
+      , l "e" (e, expAdd)
+      , l "eBiasResult" $ eBiasResult
+      , l "maxExponent" $ bitArrayInt (maxExponent @e)
+
+      , "\nSIGNIFICAND:"
       , l "s1" $ prettyBinFrac (intVal @m) $ significand f1
       , l "s2" $ prettyBinFrac (intVal @m) $ significand f2
-      , l "significand" $ prettyBinFrac (intVal @m * 2) s
-      , l "s'" $ prettyBinFrac (intVal @m) s'
+      , l "s0" $ prettyBinFrac (intVal @m * 2) s0
+      , l "hsb" hsb
+      , l "s1" $ prettyBinFrac (intVal @m) s1
+      , l "s2" $ prettyBinFrac (intVal @m) s2
       , l "m" $ prettyBinFrac (intVal @m) m
+      , l "m natural" $ m
       , l "expAdd" $ expAdd
       , ""
 
-      , l "e1" (unbiasedExponent f1, addBias @e $ unbiasedExponent f1)
-      , l "e2" (unbiasedExponent f2, addBias @e $ unbiasedExponent f2)
-      , l "e" e -- , addBias @e e)
---      , l "eBiased" $ bitArrayInt eBiased
-      , l "maxExponent" $ bitArrayInt (maxExponent @e)
       , l "result bits" $ showFloatBits float
       , l "result" float
       ]

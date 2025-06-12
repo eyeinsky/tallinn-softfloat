@@ -202,11 +202,21 @@ prop_parseShowRoundtripNativeFloat = H.property $ do
 
 -- * Operations
 hot :: IO ()
--- hot = runTest "" prop_multiplication
--- (hot :: IO ()) = H.recheckAt (H.Seed 4936066334461211705 2110126111092947499) "72:aCaCaIh22" prop_multiplication
--- hot = H.recheckAt (H.Seed 1810217614510917368 7538698885017751741) "1:a" prop_multiplication
--- hot = H.recheckAt (H.Seed 499228071421766153 13311263923328427387) "1:" prop_multiplication
-hot = H.recheckAt (H.Seed 9873241771532503570 17835145012515769455) "2:" prop_multiplication
+hot = do
+  -- 0 * 0
+  -- H.recheckAt (H.Seed 1810217614510917368 7538698885017751741) "1:a" prop_multiplication
+
+  -- normal floats, significand mult no bit, exponent underflows
+  -- H.recheckAt (H.Seed 4936066334461211705 2110126111092947499) "72:aCaCaIh22" prop_multiplication
+
+  -- normal floats, significand mult adds a bit, exponent underflows
+  -- H.recheckAt (H.Seed 2481219407159770857 684369809919923107) "93:oNi3UiHiJhG" prop_multiplication
+
+  -- normal floats, exponent underflows, s no added bit, exponent underflows
+  -- H.recheckAt (H.Seed 6526926780533748128 18257915468455970933) "28:dA5gF" prop_multiplication
+
+  runTest prop_multiplication
+
 (hot' :: IO ()) = do
   let
     a = fromBits @Word32 0b0_10000000_00000000110101101000101 :: Soft.Float
@@ -216,6 +226,26 @@ hot = H.recheckAt (H.Seed 9873241771532503570 17835145012515769455) "2:" prop_mu
     threadDelay 1000
     putStrLn $ show a <> " * " <> show b <> " = " <> show res
     putStrLn $ unlines debug
+
+test_multiplication soft1 soft2 = do
+  let (debug, sf) = multiply soft1 soft2
+  let nf = nf1 * nf2
+  nfw <- liftIO $ viaStorable @Float @Word32 nf
+
+  let notes = unlines $ debug <>
+        [ "native: " <> show nf <> " = " <> show nf1 <> " * " <> show nf2
+        , l "binaryNatural soft   bits" $ BitArray @32 (binaryNatural sf)
+        , l "binaryNatural native bits" $ BitArray @32 (binaryNatural nfw)
+        ]
+  -- liftIO $ threadDelay 10000 >> putStrLn notes
+  H.footnote notes
+
+  where
+    native1 = softToNative soft1
+    native2 = softToNative soft2
+
+
+
 
 prop_multiplication :: H.Property
 prop_multiplication = H.property $ do
@@ -229,10 +259,12 @@ prop_multiplication = H.property $ do
   nfw <- liftIO $ viaStorable @Float @Word32 nf
 
   let notes = unlines $ debug <>
-        [ l "nf" nf
+        [ "native: " <> show nf <> " = " <> show nf1 <> " * " <> show nf2
+        , l "binaryNatural soft   bits" $ BitArray @32 (binaryNatural sf)
+        , l "binaryNatural native bits" $ BitArray @32 (binaryNatural nfw)
         ]
-  liftIO $ threadDelay 10000 >> putStrLn notes
-  -- H.footnote notes
+  -- liftIO $ threadDelay 10000 >> putStrLn notes
+  H.footnote notes
 
   binaryNatural sf === binaryNatural nfw
 
@@ -337,6 +369,9 @@ softNativePair = do
   soft <- normalSoftfloat
   let native = unsafePerformIO $ viaStorable (toBits soft)
   return (soft, native)
+
+softToNative :: Soft.Float -> Native.Float
+softToNative soft = unsafePerformIO $ viaStorable (toBits soft)
 
 -- | Generate a regular finite float, i., not a special value (nan, inf) nor a subnormal finite float.
 normalSoftfloat :: forall m' b e m . (H.MonadGen m', KnownNat b, KnownNat e, KnownNat m) => m' (Format b e m)
