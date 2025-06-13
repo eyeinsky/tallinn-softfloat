@@ -7,13 +7,14 @@ import Data.Bits
 import Hedgehog ((===))
 import Hedgehog qualified as H
 import Hedgehog.Gen qualified as Gen
-import Hedgehog.Range qualified as Range
+-- import Hedgehog.Range qualified as Range
 import Test.Tasty qualified as Tasty
 import Test.Tasty.Hedgehog qualified as Tasty
 
 import Data.Bit
 
 
+tests :: [Tasty.TestTree]
 tests =
   [ Tasty.testProperty "Basic unit tests" Main_DataBits.prop_roundEvenUnit
   , Tasty.testProperty "roundEven property test against arbitrary Word16" Main_DataBits.prop_roundEven

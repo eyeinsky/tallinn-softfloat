@@ -1,3 +1,7 @@
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE TypeFamilyDependencies #-}
+
 module Data.Bit where
 
 import Prelude
@@ -11,6 +15,10 @@ import Foreign.Storable
 import Data.Word
 import System.IO.Unsafe
 import Debug.Trace
+import Data.Proxy
+import GHC.TypeLits
+import Data.Kind
+import Data.Int
 
 data Bit = O | I deriving (Eq, Show, Enum)
 
@@ -218,12 +226,11 @@ viaStorable f = do
 
 instance Bits Float where
   testBit f ix = testBit (unsafePerformIO $ viaStorable @_ @Word32 f) ix
-instance FiniteBits Float where
-  finiteBitSize _ = 32
 instance Bits Double where
   testBit f ix = testBit (unsafePerformIO $ viaStorable @_ @Word64 f) ix
-instance FiniteBits Double where
-  finiteBitSize _ = 64
+
+-- instance Enum Float where
+-- instance Enum Double where
 
 -- | Positive infinity
 n_inf :: Float
@@ -232,3 +239,19 @@ n_inf = 1/0
 -- | Non-signaling NaN
 n_nan :: Float
 n_nan = 0/0
+
+-- * Finite binary
+
+class FiniteBinary a where
+  type Width a :: Natural
+
+instance FiniteBinary Word8  where type Width Word8  = 8
+instance FiniteBinary Word16 where type Width Word16 = 16
+instance FiniteBinary Word32 where type Width Word32 = 32
+instance FiniteBinary Word64 where type Width Word64 = 64
+
+instance FiniteBinary Float  where type Width Float  = 32
+instance FiniteBinary Double where type Width Double = 64
+
+-- instance (Bits a, FiniteBinary a, KnownNat (Width a)) => FiniteBits a where
+--   finiteBitSize _ = fromIntegral (natVal @(Width a) Proxy)

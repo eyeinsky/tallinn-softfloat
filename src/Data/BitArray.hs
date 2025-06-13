@@ -1,3 +1,4 @@
+{-# LANGUAGE TypeFamilies #-}
 module Data.BitArray
   ( module Data.BitArray
   , module Data.Bit
@@ -54,6 +55,8 @@ instance KnownNat w => Num (BitArray w) where
 instance Eq (BitArray w) where BitArray a == BitArray b = a == b
 instance Ord (BitArray w) where compare (BitArray a) (BitArray b) = compare a b
 
+instance FiniteBinary (BitArray w) where
+  type Width (BitArray w) = w
 instance KnownNat w => FiniteBits (BitArray w) where
   finiteBitSize _ = intVal @w
 
@@ -89,11 +92,6 @@ showIntBits a = if a < 0
 
 showPosIntBits :: T -> String
 showPosIntBits a = showIntAtBase 2 intToDigit a ""
-
--- * Operations
-
-multiply :: KnownNat (a + b) => BitArray a -> BitArray b -> BitArray (a + b)
-multiply = mkOp2 (*)
 
 -- * Bit list interop
 

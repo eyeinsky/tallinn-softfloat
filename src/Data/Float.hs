@@ -10,7 +10,7 @@ import Data.Kind
 import Data.Char hiding (Format)
 import Data.Bits
 import Data.Word
-
+import Data.Scientific qualified as Scientific
 
 import Data.BitArray as BitArray hiding (multiply)
 -- import Data.BitArray qualified as BitArray
@@ -56,19 +56,20 @@ unbiasedExponent :: forall s e m . (KnownNat e, KnownNat m) => Format s e m -> I
 unbiasedExponent = fst . exponentSignificand
 
 data WidthResult a
-  = Overflow
+  = Overflow Integer
   | Result a
-  | Underflow Natural
+  | Underflow Integer
   deriving Show
 
 -- | Add bias to exponent @e@, indicate both under- or overflow
 addBias_ :: forall e . KnownNat e => Integer -> WidthResult (BitArray e)
 addBias_ e
-  | eb <= 0 = Underflow $ fromIntegral $ abs eb
-  | eb > fromIntegral (maxExponent :: BitArray e) = Overflow
+  | eb <= 0 = Underflow $ minExponent @e - e -- absolute distance between given and the minimal exponent
+  | eb > maxExponent' = Overflow $ eb - maxExponent'
   | otherwise = Result $ fromIntegral $ abs eb
   where
     eb = e + fromIntegral (bias @e) :: Integer
+    maxExponent' = maxExponent @e :: Integer
 
 -- | Add bias to exponent @e@. Nothing means underflow.
 addBias :: forall e . KnownNat e => Integer -> BitArray e
@@ -105,11 +106,21 @@ instance Eq (Format b e m) where
 -- one-less than all-ones exponent, as otherwise it will be infinity
 -- or nan (depending on mantissa value).
 
-maxExponent :: forall w . KnownNat w => BitArray w
-maxExponent = (maxBound :: BitArray w) - 1
+maxExpBiased :: forall w . KnownNat w => BitArray w
+maxExpBiased = (maxBound :: BitArray w) - 1
+
+maxExponent :: forall e a . (KnownNat e, Num a) => a
+maxExponent = fromIntegral (maxExpBiased :: BitArray e)
+
+minExpBiased :: forall e . KnownNat e => BitArray e
+minExpBiased = 1
+
+minExponent :: forall e a . (KnownNat e, Num a) => a
+minExponent = 1 - fromIntegral (bias @e)
+
 instance (KnownNat b, KnownNat e, KnownNat m) => Bounded (Format b e m) where
-  minBound = Format I maxExponent (maxBound :: BitArray m)
-  maxBound = Format O maxExponent (maxBound :: BitArray m)
+  minBound = Format I maxExpBiased (maxBound :: BitArray m)
+  maxBound = Format O maxExpBiased (maxBound :: BitArray m)
 
 instance (KnownNat b, KnownNat e, KnownNat m) => FiniteBits (Format b e m) where
   finiteBitSize _ = intVal @e + intVal @m + 1
@@ -119,12 +130,14 @@ instance (KnownNat b, KnownNat e, KnownNat m) => Bits (Format b e m) where
   Format s1 e1 m1 .|. Format s2 e2 m2 = Format (s1 .|. s2) (e1 .|. e2) (m1 .|. m2)
   Format s1 e1 m1 `xor` Format s2 e2 m2 = Format (s1 `xor` s2) (e1 `xor` e2) (m1 `xor` m2)
   complement (Format s e m) = Format (complement s) (complement e) (complement m)
+
   shift f i = foldl' setBit zero $ newIndexes (+ i) f
+
   rotate f i = foldl' setBit zero $ newIndexes (\j -> mod (j + i) $ finiteBitSize f) f
   bitSize = finiteBitSize
   bitSizeMaybe = Just . finiteBitSize
   isSigned Format{sign} = sign == I
-  popCount = u -- todo
+  popCount (Format s e m) = popCount e + popCount m + (case s of I -> 1; O -> 0)
 
   testBit f@Format{sign, exponent, mantissa} i
     | i < mantissaWidth = testBit mantissa i
@@ -146,12 +159,23 @@ instance (KnownNat b, KnownNat e, KnownNat m) => Bits (Format b e m) where
       exponentWidth = intVal @e
       i' = i - mantissaWidth
 
+instance FiniteBinary Half where
+  type Width (Format 2 5 10) = 16
+instance FiniteBinary Float where
+  type Width (Format 2 8 23) = 32
+instance FiniteBinary Double where
+  type Width (Format 2 11 52) = 64
+instance FiniteBinary Binary128 where
+  type Width (Format 2 15 112) = 128
+instance FiniteBinary Binary256 where
+  type Width (Format 2 19 236) = 256
+
 -- | Read a float from a value having a binary representation, i.e, a @Bits@ instance.
 -- TODO add tests
-fromBits
+fromBits_
   :: forall bits b e m . (Bits bits, KnownNat b, KnownNat e, KnownNat m)
   => bits -> Format b e m
-fromBits source = Format
+fromBits_ source = Format
   { sign = if testBit source (mw + ew) then I else O
   , exponent = integerBits source mw (mw + ew)
   , mantissa = integerBits source 0 mw
@@ -193,6 +217,7 @@ lxs label cap xs = let
     value = show xs' <> " (" <> show (length xs') <> cappedMsg <> ")"
   in label <> ": " <> value
 
+-- FIXME this doesn't work fractions with zeroes in front of of the fraction part, i.e 0.0625 parses to 0.625
 parseFloat
   :: forall b e m . (KnownNat b, KnownNat e, KnownNat m)
   => String -> ([String], (Format b e m, String))
@@ -241,12 +266,12 @@ fromIntParts int fracInt = (debug, (biasedExponent_, bitsToArrayBE mantissaBits 
       , l "exp" exp
       , lxs "rounded mantissa" 70 mantissa'
       , l "exp, biased" biasedExp'
-      , l "biased exponent == maxExponent" ((biasedExp', maxExponent :: BitArray e), (biasedExp' == maxExponent))
+      , l "biased exponent == maxExpBiased" ((biasedExp', maxExpBiased :: BitArray e), (biasedExp' == maxExpBiased))
       , l "extra digit" extraDigit
       , "</maybeFracInt>"
       ]
 
-    (mantissaBits :: [Bit], biasedExponent_ :: BitArray e) = if biasedExp' > maxExponent -- the only higher value is all-ones
+    (mantissaBits :: [Bit], biasedExponent_ :: BitArray e) = if biasedExp' > maxExpBiased -- the only higher value is all-ones
       then (replicate (intVal @m) 0, maxBound) -- infinity
       else (drop 1 mantissa', biasedExp')      -- drop 1: leave leading bit implicit
 
@@ -290,93 +315,70 @@ instance (KnownNat b, KnownNat e, KnownNat m) => Read (Format b e m) where
 instance (KnownNat b, KnownNat e, KnownNat m) => Fractional (Format b e m) where
   (/) = u
   recip = u
-  fromRational = u
+  fromRational r = f
+    where
+      -- TODO stopgap that goes through scientific and string, replace with a real parser
+      sci = fromRational r :: Scientific.Scientific
+      str = Scientific.formatScientific Scientific.Fixed Nothing sci
+      (_, (f, _)) = parseFloat str
 
 mantissaBits :: Format b q c -> (String, Int)
 mantissaBits (Format _s _e m) = let mbits = showPosIntBits $ bitArrayInt m in (mbits, length mbits)
-
-ba :: forall w . KnownNat w => Natural -> BitArray w
-ba n = BitArray n
-
-xorSign :: Bit -> Bit -> Format b e m -> Format b e m
-xorSign s1 s2 f = f{sign = xor s1 s2 }
 
 multiply :: forall b e m . Format b e m -> Format b e m -> ([String],  Format b e m)
 multiply f1@(Format sign1 _ _m1) f2@(Format sign2 _ _m2)
   | isNan f1 || isNan f2 = ([], addSign nan)                       -- nan * _ = nan
   | isInf f1 && f2 == 0 || isInf f2 && f1 == 0 = ([], addSign nan) -- 0 * inf = nan
   | isZero f1 || isZero f2 = ([], addSign 0)                       -- 0 * _   = 0
+  | isInf f1 || isInf f2 = ([], addSign inf)                       -- inf * _ = inf
   | otherwise = (debug, addSign float)
   where
-    addSign = xorSign sign1 sign2
+    addSign f = f{sign}
     sign = sign1 `xor` sign2
-    ix = intVal @m
+    ix = intVal @m :: Integer
 
     s0 = significand f1 * significand f2
-    hsb = fromMaybe (error "no highest set bit") $ highestSetBit s0
+    clearIx = let
+      hsb = highestSetBit s0
+      ix2 = intVal @m * 2
+      noOverflow = hsb == ix2
+      in if noOverflow then ix2 else ix2 + 1
 
-    -- exponent
     e0 = unbiasedExponent f1 + unbiasedExponent f2
 
-    expAdd = not $ hsb == (intVal @m * 2)
-    (s1, m, e) = if expAdd
-      then let -- exp gained a bit
-        s' = roundEven (ix + 1) s0
-        m = clearBit s' (ix + 1)
-        in (s', m, e0 - 1)
-      else let -- regular
-        s' = roundEven ix s0
-        m = clearBit s' ix
-        in (s', m, e0)
+    e1 = addBias_ @e e0 :: WidthResult (BitArray e)
 
-    eBiasResult = addBias_ e
-
-    (float, s2) = case eBiasResult of
-      Overflow -> (Format sign maxBound 0, 0)
+    float, float' :: Format b e m
+    float' = zero
+    float = case e1 of
+      Overflow{} -> Format sign maxBound 0 -- exponent overflow means infinity
       Underflow underflow ->
-        if underflow > intVal @m
-        then (Format sign 0 0, 0)
-        else
-          let
-          s2 = roundEven (fromIntegral underflow + ix + 1) s0
-          in (Format sign 0 $ BitArray s2, s2)
+        let
+          -- s0 has the multiplication result
+          -- rounding it to ix would make it work with the underflown exponent
+          -- but we need more!
+          roundTo = fromIntegral $ underflow + ix -- 1.000 -> 0.01
+          m = roundEven roundTo s0 :: Natural
 
-      Result eBiased ->
+        in Format sign 0 (BitArray m)
 
-        (Format @b @e @m sign eBiased $ BitArray m, m)
+      Result e -> let
+        in Format sign e m
+
+    m = BitArray $ roundEven (fromIntegral ix) (clearBit s0 clearIx) :: BitArray m
 
     debug =
-      [ ""
-      , show f1 <> " * " <> show f2
-      , l "f1" $ showFloatBits f1
-      , l "f2" $ showFloatBits f2
-
-      , "\nEXPONENT"
-      , l "e1" (unbiasedExponent f1, addBias @e $ unbiasedExponent f1)
-      , l "e2" (unbiasedExponent f2, addBias @e $ unbiasedExponent f2)
-      , l "e0" e0
-      , l "e" (e, expAdd)
-      , l "eBiasResult" $ eBiasResult
-      , l "maxExponent" $ bitArrayInt (maxExponent @e)
-
-      , "\nSIGNIFICAND:"
-      , l "s1" $ prettyBinFrac (intVal @m) $ significand f1
-      , l "s2" $ prettyBinFrac (intVal @m) $ significand f2
-      , l "s0" $ prettyBinFrac (intVal @m * 2) s0
-      , l "hsb" hsb
-      , l "s1" $ prettyBinFrac (intVal @m) s1
-      , l "s2" $ prettyBinFrac (intVal @m) s2
-      , l "m" $ prettyBinFrac (intVal @m) m
-      , l "m natural" $ m
-      , l "expAdd" $ expAdd
+      [ l "s0" $ prettyBinFrac (intVal @m * 2) s0
+      , "e0, unbiased: " <> unwords [show e0, "=", show (unbiasedExponent f1), "+", show (unbiasedExponent f2) <> ", min/max " <> show (minExponent @e) <> "/" <> show (maxExponent @e)]
+      , l "e1, bias result" e1
+      , l "m0" m
       , ""
-
-      , l "result bits" $ showFloatBits float
-      , l "result" float
+      , l "f1 exp" $ unbiasedExponent f1
+      , l "f2 exp" $ unbiasedExponent f2
       ]
 
-highestSetBit :: Natural -> Maybe Int
-highestSetBit n = Just $ floor $ logBase (2 :: Native.Double) $ fromIntegral n
+highestSetBit :: Natural -> Int
+highestSetBit n = floor $ logBase (2 :: Native.Double) $ fromIntegral n
 
 divide :: (KnownNat b, KnownNat e, KnownNat m) => Format b e m -> Format b e m -> Format b e m
 divide _a b
@@ -400,7 +402,7 @@ showDescribeFloat float@(Format sign e m)
       0 -> (s <> "inf", ws [signWord, Just "infinity"])
        -- NaN: exponent is all ones, mantissa not all zeroes; mantissa greater than signalingBound is a signaling NaN
       _ -> (s <> sg <> "nan", ws [signWord, siganling, Just "nan"])
-  | otherwise      = (viaRational, "regular float: " <> show float)
+  | otherwise      = (viaRational, "normal")
   where
     ws = unwords . catMaybes
     s = case sign of I -> "-"; O -> ""
@@ -422,13 +424,16 @@ showFloatBits_ = filter (/= '_') . showFloatBits
 
 -- | Should this be in Fractional class?
 floatToRational :: forall b e m . Format b e m -> Rational
-floatToRational f@(Format sign _exponent mantissa) =
-  addSign sign $ 2^^(unbiasedExponent f) * rationalMantissa mantissa
+floatToRational f@(Format sign exponent mantissa) = case exponent of
+  -- subnormal
+  0 -> addSign sign $ 2^^(unbiasedExponent f) * asBinaryFraction mantissa
+  -- normal
+  _ -> addSign sign $ 2^^(unbiasedExponent f) * rationalMantissa mantissa
   where
     addSign :: Num a => Bit -> a -> a
-    addSign sign b = case sign of
-      O -> b
-      I -> 0-b
+    addSign sign = case sign of
+      O -> id
+      I -> negate
 
 rationalMantissa :: BitArray w -> Rational
 rationalMantissa m = 1 + asBinaryFraction m

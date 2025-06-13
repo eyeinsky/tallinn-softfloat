@@ -48,7 +48,7 @@ main = Tasty.defaultMain $ Tasty.testGroup "Softfloat"
     ]
 
   , Tasty.testGroup "Operations"
-    [ Tasty.testProperty "Multiplication" prop_multiplication
+    [ Tasty.testProperty "Multiplication" prop_multiply
     , Tasty.testProperty "Division" prop_division
     , Tasty.testProperty "Addition" prop_addition
     , Tasty.testProperty "Subtraction" prop_subtraction
@@ -157,11 +157,11 @@ unitTest_floatParsing = unitTest $ do
   showDescribeFloat' (Format I maxBound (1 + signalingBound @2 @10)) === ("-nan", "negative nan")
 
   let f12 = read' "1.2"
-  f12 === fromBits @Integer 0b0011110011001101
+  f12 === fromBits_ @Integer 0b0011110011001101
   show f12 === "1.2001953125"
 
   let f13 = read' "1.3"
-  f13 === fromBits @Integer 0b0011110100110011
+  f13 === fromBits_ @Integer 0b0011110100110011
   show f13 === "1.2998046875"
 
   let f32 str = compareParsingAgainstNative @Native.Float @Word32 @Soft.Float str
@@ -179,7 +179,7 @@ unitTest_floatParsing = unitTest $ do
 prop_parsingFromBinary :: H.Property
 prop_parsingFromBinary = unitTest $ do
   let fromBits' :: Integer -> Soft.Format 2 3 4
-      fromBits' = fromBits
+      fromBits' = fromBits_
 
   show (nan @2 @3 @4) === "nan"
   show (snan @2 @3 @4 (0b101 :: BitArray 3)) === "snan"
@@ -201,54 +201,121 @@ prop_parseShowRoundtripNativeFloat = H.property $ do
 -- hot = runTests "" Main_DataBits.tests
 
 -- * Operations
-hot :: IO ()
-hot = do
-  -- 0 * 0
-  -- H.recheckAt (H.Seed 1810217614510917368 7538698885017751741) "1:a" prop_multiplication
-
-  -- normal floats, significand mult no bit, exponent underflows
-  -- H.recheckAt (H.Seed 4936066334461211705 2110126111092947499) "72:aCaCaIh22" prop_multiplication
-
-  -- normal floats, significand mult adds a bit, exponent underflows
-  -- H.recheckAt (H.Seed 2481219407159770857 684369809919923107) "93:oNi3UiHiJhG" prop_multiplication
-
-  -- normal floats, exponent underflows, s no added bit, exponent underflows
-  -- H.recheckAt (H.Seed 6526926780533748128 18257915468455970933) "28:dA5gF" prop_multiplication
-
-  runTest prop_multiplication
 
 (hot' :: IO ()) = do
   let
-    a = fromBits @Word32 0b0_10000000_00000000110101101000101 :: Soft.Float
-    b = fromBits @Word32 0b0_10000000_00000001100110010100101 :: Soft.Float
+    a = fromBits_ @Word32 0b0_10000000_00000000110101101000101 :: Soft.Float
+    b = fromBits_ @Word32 0b0_10000000_00000001100110010100101 :: Soft.Float
     (debug, res) = multiply a b
   liftIO $ do
     threadDelay 1000
     putStrLn $ show a <> " * " <> show b <> " = " <> show res
     putStrLn $ unlines debug
 
-test_multiplication soft1 soft2 = do
-  let (debug, sf) = multiply soft1 soft2
-  let nf = nf1 * nf2
-  nfw <- liftIO $ viaStorable @Float @Word32 nf
+-- test_multiplication soft1 soft2 = do
+--   let (debug, sf) = multiply soft1 soft2
+--   let nf = nf1 * nf2
+--   nfw <- liftIO $ viaStorable @Float @Word32 nf
 
-  let notes = unlines $ debug <>
-        [ "native: " <> show nf <> " = " <> show nf1 <> " * " <> show nf2
-        , l "binaryNatural soft   bits" $ BitArray @32 (binaryNatural sf)
-        , l "binaryNatural native bits" $ BitArray @32 (binaryNatural nfw)
-        ]
-  -- liftIO $ threadDelay 10000 >> putStrLn notes
-  H.footnote notes
+--   let notes = unlines $ debug <>
+--         [ "native: " <> show nf <> " = " <> show nf1 <> " * " <> show nf2
+--         , l "binaryNatural soft   bits" $ BitArray @32 (binaryNatural sf)
+--         , l "binaryNatural native bits" $ BitArray @32 (binaryNatural nfw)
+--         ]
+--   -- liftIO $ threadDelay 10000 >> putStrLn notes
+--   H.footnote notes
 
-  where
-    native1 = softToNative soft1
-    native2 = softToNative soft2
-
-
+--   where
+--     native1 = softToNative soft1
+--     native2 = softToNative soft2
 
 
-prop_multiplication :: H.Property
-prop_multiplication = H.property $ do
+type Small = Format 2 3 3
+
+delayed a = liftIO $ do
+  threadDelay 1000
+  a
+
+hot :: IO ()
+hot = do
+  -- runTest unitTest_BitsInstance
+  -- runTest unitTest_multiply
+  -- H.recheckAt (H.Seed 16975537929181517343 15631089919146336913) "38:aC2bAiH20" prop_multiply
+  H.recheckAt (H.Seed 5030941632379584368 14175235372969874745) "50:bA3fDcDc2IdC2" prop_multiply
+  -- runTest prop_multiply
+
+unitTest_BitsInstance :: H.Property
+unitTest_BitsInstance = unitTest $ do
+  let
+    test op a b = op (fromBits_ (a :: Natural) :: Small) === (fromBits_ (b :: Natural) :: Small)
+  test (flip shiftR 1) 0b111000 0b11100
+  test (flip shiftR 2) 0b111000  0b1110
+  test (flip shiftR 3) 0b111000   0b111
+  test (flip shiftR 4) 0b111000    0b11 -- TODO
+
+desc :: String -> Format b e m -> String
+desc label f = let
+  (shown, described) = showDescribeFloat f
+  bits = showFloatBits f
+  in label <> "{" <> intercalate ", " [shown, bits, described] <> "}"
+
+makeNote :: Format b e m -> Format b e m -> Format b e m -> Format b e m -> [String] -> String
+makeNote a b expected result debug =
+  unlines $
+    [ unwords [ "operation:", desc "a" a, "*", desc "b" b, "=", desc "expected" expected ]
+    , "expected " <> showFloatBits expected
+    , "result   " <> showFloatBits result
+    ] <> debug
+
+unitTest_multiply :: H.Property
+unitTest_multiply = unitTest $ do
+  let
+    small b = fromBits_ (b :: Natural) :: Small
+
+    test :: Natural -> Natural -> Small -> H.PropertyT IO ()
+    test a' b' expected = do
+      let a = fromBits_ a' :: Small
+          b = fromBits_ b' :: Small
+          (debug, result) = multiply a b
+          note = makeNote a b expected result debug
+      H.footnote note
+      -- delayed $ putStrLn note
+      result === expected
+
+    test_ :: Small -> Natural -> Small -> Natural -> Small -> Natural -> H.PropertyT IO ()
+    test_ a aNat b bNat expected expectedNat = do
+      let a' = fromBits_ aNat
+          b' = fromBits_ bNat
+          expected' = fromBits_ expectedNat
+          (debug, result) = multiply a b
+          note = makeNote a b expected result debug
+      H.footnote note
+      -- delayed $ putStrLn note
+      a === a'
+      b === b'
+      expected === expected'
+      result === expected
+
+  let f_9 = 0b0110001
+      f_0'0625 = small 0b0_000_010
+
+  test_ 0.5 0b0_010_000 0.5 0b0_010_000 0.25 0b0_001_000 -- 0.5 * 0.5 = 0.25
+  test 0b0001000 0b0001000 f_0'0625 -- two normal floats amount to a subnormal 0.25 * 0.25 = 0.0625
+
+  test 0b0011000 0b0011000 1 -- 1 * 1 = 1
+  test 0b0110000 0b0110000 inf -- exponent overflow is infinity: exponent is already maxed out at 3 (0b110)
+
+  -- special cases:
+  test 0b0111100 f_9      nan -- nan * _
+  test f_9       0b0111001 nan -- _ * nan
+  test 0b0111000 0         nan -- _ * nan
+  test 0b0111000 0b1111000 (negate inf) -- inf * -inf = -inf
+  test 0b0111000 f_9      inf
+  test f_9      0b1111000 (negate inf)
+
+
+prop_multiply :: H.Property
+prop_multiply = H.property $ do
 -- prop_multiplication = H.withTests 10000 $ H.property $ do
 -- prop_multiplication = unitTest $ do
   (sf1, nf1) <- H.forAll softNativePair
@@ -263,8 +330,10 @@ prop_multiplication = H.property $ do
         , l "binaryNatural soft   bits" $ BitArray @32 (binaryNatural sf)
         , l "binaryNatural native bits" $ BitArray @32 (binaryNatural nfw)
         ]
+      note = makeNote sf1 sf2 (fromBits_ nfw) sf debug
   -- liftIO $ threadDelay 10000 >> putStrLn notes
-  H.footnote notes
+
+  H.footnote note
 
   binaryNatural sf === binaryNatural nfw
 
@@ -360,7 +429,7 @@ anyFloat2
      , Enum w, Bounded w, Bits w)
   => m' f
 anyFloat2 = do
-  fromBits <$> (Gen.enumBounded @m' @w)
+  fromBits_ <$> (Gen.enumBounded @m' @w)
 
 -- yyy
 
