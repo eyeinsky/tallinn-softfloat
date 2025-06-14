@@ -199,6 +199,7 @@ bitsNatural a = go a zeroBits 0
 
 -- | Round off @n@ bits from right.
 roundEven :: forall a . (Bits a, Num a, Ord a) => Int -> a -> a
+roundEven 0 a = a
 roundEven n a = if
   -- first remainder bit is 0: truncate
   | not r -> t0

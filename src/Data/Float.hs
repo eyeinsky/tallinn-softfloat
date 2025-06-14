@@ -337,45 +337,86 @@ multiply f1@(Format sign1 _ _m1) f2@(Format sign2 _ _m2)
     sign = sign1 `xor` sign2
     ix = intVal @m :: Integer
 
-    s0 = significand f1 * significand f2
-    clearIx = let
-      hsb = highestSetBit s0
-      ix2 = intVal @m * 2
-      noOverflow = hsb == ix2
-      in if noOverflow then ix2 else ix2 + 1
+    s0 = significand f1 * significand f2 :: Natural
+    subnormalS0 = not $ testBit s0 (intVal @m * 2) && not (testBit s0 (intVal @m * 2 + 1)) -- no 1. nor 10. for s0
 
-    e0 = unbiasedExponent f1 + unbiasedExponent f2
-
+    e0 = unbiasedExponent f1 + unbiasedExponent f2 :: Integer
     e1 = addBias_ @e e0 :: WidthResult (BitArray e)
 
     float, float' :: Format b e m
     float' = zero
-    float = case e1 of
-      Overflow{} -> Format sign maxBound 0 -- exponent overflow means infinity
-      Underflow underflow ->
-        let
-          -- s0 has the multiplication result
-          -- rounding it to ix would make it work with the underflown exponent
-          -- but we need more!
-          roundTo = fromIntegral $ underflow + ix -- 1.000 -> 0.01
-          m = roundEven roundTo s0 :: Natural
+    (float, debug') = if subnormalS0
 
-        in Format sign 0 (BitArray m)
+      then let
+          hsb = fromIntegral $ highestSetBit s0 -- this many steps to zero
+          dNormal = intVal @m * 2 - hsb -- this many steps to get to normal
+          e0' = e0 - dNormal
+          e1' = addBias_ @e e0'
 
-      Result e -> let
-        in Format sign e m
+          (float, debug') = case e1' of
+            Underflow exponentUnderflow -> let
 
-    m = BitArray $ roundEven (fromIntegral ix) (clearBit s0 clearIx) :: BitArray m
+              in
+              (zero, [])
+            _ -> (zero, [])
+
+          in (float,
+              [ "\nSUBNORMAL"
+              , l "hsb" hsb
+              , l "dNormal" dNormal
+              , l "e0'" e0'
+              , l "e1'" e1'
+              ] <> debug'
+             )
+
+
+      else case e1 of
+        Overflow{} -> (Format sign maxBound 0, ["OVERFLOW"]) -- exponent overflow means infinity
+        Underflow exponentUnderflow ->
+          let
+            roundTo = fromIntegral $ exponentUnderflow + ix -- round more to the amount of underflow
+            debug' =
+              [ "\nEXPONENT UNDERFLOW"
+              , l "roundTo" roundTo
+              , l "m" $ BitArray @24 n
+              , l "m" m
+              , l "roundingOverflow" roundingOverflow
+              ]
+            n = roundEven roundTo s0 :: Natural
+            roundingOverflow = testBit n (intVal @m)
+            m = BitArray n
+            float = if exponentUnderflow == 1 && roundingOverflow -- roundingOverflow can only improve exponent by an amount of 1
+              then Format sign 1 (clearBit m (intVal @m))
+              else Format sign 0 m
+
+          in (float, debug')
+
+        Result e -> let
+            hsb = highestSetBit s0
+            ix2 = intVal @m * 2
+            sigMultOverflow = hsb /= ix2
+            roundTo = if sigMultOverflow then ix + 1 else ix
+            s1 = roundEven (fromIntegral roundTo) s0
+            roundingOverflow = testBit s1 (intVal @m + 1)
+
+            m = BitArray (clearBit s1 (intVal @m))
+            float = if roundingOverflow || sigMultOverflow
+              then Format sign (e + 1) m
+              else Format sign e m
+
+          in (float,
+              [ "\nEXPONENT RESULT " <> show e
+              , l "highestSetBit" hsb
+              , l "roundTo (sigMultOverflow)" (roundTo, sigMultOverflow)
+              , l "s1 (rounded to roundTo)" $ prettyBinFrac (intVal @m) s1
+              , l "roundingOverflow" roundingOverflow
+              ])
 
     debug =
-      [ l "s0" $ prettyBinFrac (intVal @m * 2) s0
+      [ "s0: " <> prettyBinFrac (intVal @m * 2) s0 <> " subnormalS0: " <> show subnormalS0
       , "e0, unbiased: " <> unwords [show e0, "=", show (unbiasedExponent f1), "+", show (unbiasedExponent f2) <> ", min/max " <> show (minExponent @e) <> "/" <> show (maxExponent @e)]
       , l "e1, bias result" e1
-      , l "m0" m
-      , ""
-      , l "f1 exp" $ unbiasedExponent f1
-      , l "f2 exp" $ unbiasedExponent f2
-      ]
+      ] <> debug'
 
 highestSetBit :: Natural -> Int
 highestSetBit n = floor $ logBase (2 :: Native.Double) $ fromIntegral n
