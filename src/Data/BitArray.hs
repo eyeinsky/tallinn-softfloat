@@ -50,7 +50,11 @@ instance KnownNat w => Num (BitArray w) where
   (*) = mkOp2 (*)
   abs a = a
   signum _ = 1
-  fromInteger = BitArray . fromInteger
+  fromInteger = BitArray . fromInteger -- FIXME: using bitArray from below loops, figure out why
+
+-- | Smart constructor for BitArray which removes any overflow from input Natural.
+bitArray :: forall w . KnownNat w => Natural -> BitArray w
+bitArray n = BitArray n .&. maxBound
 
 instance Eq (BitArray w) where BitArray a == BitArray b = a == b
 instance Ord (BitArray w) where compare (BitArray a) (BitArray b) = compare a b

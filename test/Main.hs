@@ -12,6 +12,7 @@ import Control.Concurrent
 import GHC.TypeLits
 import System.IO.Unsafe
 import Foreign.Storable
+import Text.Printf
 
 import Hedgehog ((===))
 import Hedgehog qualified as H
@@ -216,6 +217,10 @@ hot = do
   H.recheckAt (H.Seed 10984703261618746247 10933244729112182337) "94:cAbCdA19" prop_multiply -- normal * subnormal = subnormal
   -- runTest prop_multiply
 
+unitTest_addBias :: H.Property
+unitTest_addBias = unitTest $ do
+  return ()
+
 unitTest_BitsInstance :: H.Property
 unitTest_BitsInstance = unitTest $ do
   let
@@ -224,6 +229,7 @@ unitTest_BitsInstance = unitTest $ do
   test (flip shiftR 2) 0b111000  0b1110
   test (flip shiftR 3) 0b111000   0b111
   -- test (flip shiftR 4) 0b111000    0b11 -- TODO
+
 
 desc :: String -> Format b e m -> String
 desc label f = let
@@ -271,15 +277,15 @@ unitTest_multiply = unitTest $ do
   let f_9 = 0b0110001
       f_0'0625 = small 0b0_000_010
 
-  -- test 0b0001111 0b0001111 f_0'0625 -- exponents underflow, rounding overflows
+  test 0b0001111 0b0001111 f_0'0625 -- exponents underflow, rounding overflows
 
+  -- actual calcualtion tests:
   test_ 0.5 0b0_010_000 0.5 0b0_010_000 0.25 0b0_001_000 -- 0.5 * 0.5 = 0.25
   test 0b0001000 0b0001000 f_0'0625 -- two normal floats amount to a subnormal 0.25 * 0.25 = 0.0625
-
   test 0b0011000 0b0011000 1 -- 1 * 1 = 1
   test 0b0110000 0b0110000 inf -- exponent overflow is infinity: exponent is already maxed out at 3 (0b110)
 
-  -- special cases:
+  -- special case tests:
   test 0b0111100 f_9      nan -- nan * _
   test f_9       0b0111001 nan -- _ * nan
   test 0b0111000 0         nan -- _ * nan
@@ -289,8 +295,8 @@ unitTest_multiply = unitTest $ do
 
 
 prop_multiply :: H.Property
-prop_multiply = H.property $ do
--- prop_multiplication = H.withTests 10000 $ H.property $ do
+-- prop_multiply = H.property $ do
+prop_multiply = H.withTests 10000 $ H.property $ do
 -- prop_multiplication = unitTest $ do
   (sf1, nf1) <- H.forAll softNativePair
   (sf2, nf2) <- H.forAll softNativePair

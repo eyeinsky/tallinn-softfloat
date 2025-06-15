@@ -64,8 +64,8 @@ data WidthResult a
 -- | Add bias to exponent @e@, indicate both under- or overflow
 addBias_ :: forall e . KnownNat e => Integer -> WidthResult (BitArray e)
 addBias_ e
-  | eb <= 0 = Underflow $ minExponent @e - e -- absolute distance between given and the minimal exponent
-  | eb > maxExponent' = Overflow $ eb - maxExponent'
+  | eb <= 0           = Underflow $ minExponent @e - e -- absolute distance between given and the minimal exponent
+  | eb > fromIntegral (maxExpBiased @e) = Overflow $ e - maxExponent'
   | otherwise = Result $ fromIntegral $ abs eb
   where
     eb = e + fromIntegral (bias @e) :: Integer
@@ -110,7 +110,7 @@ maxExpBiased :: forall w . KnownNat w => BitArray w
 maxExpBiased = (maxBound :: BitArray w) - 1
 
 maxExponent :: forall e a . (KnownNat e, Num a) => a
-maxExponent = fromIntegral (maxExpBiased :: BitArray e)
+maxExponent = fromIntegral (maxExpBiased :: BitArray e) - fromIntegral (bias @e)
 
 minExpBiased :: forall e . KnownNat e => BitArray e
 minExpBiased = 1
@@ -338,88 +338,73 @@ multiply f1@(Format sign1 _ _m1) f2@(Format sign2 _ _m2)
     ix = intVal @m :: Integer
 
     s0 = significand f1 * significand f2 :: Natural
-    subnormalS0 = not $ testBit s0 (intVal @m * 2) && not (testBit s0 (intVal @m * 2 + 1)) -- no 1. nor 10. for s0
-
     e0 = unbiasedExponent f1 + unbiasedExponent f2 :: Integer
-    e1 = addBias_ @e e0 :: WidthResult (BitArray e)
 
-    float, float' :: Format b e m
-    float' = zero
-    (float, debug') = if subnormalS0
+    er = addBias_ @e e0 :: WidthResult (BitArray e)
 
-      then let
-          hsb = fromIntegral $ highestSetBit s0 -- this many steps to zero
-          dNormal = intVal @m * 2 - hsb -- this many steps to get to normal
-          e0' = e0 - dNormal
-          e1' = addBias_ @e e0'
+    s0hsb = highestSetBit s0
+    sigMult_overflow = s0hsb == (intVal @m * 2 + 1)
+    sigMult_normal = s0hsb == (intVal @m * 2) && not sigMult_overflow
+    sigMult_subnormal = s0hsb < (intVal @m * 2)
+    exp_resultInBounds = e0 >= minExponent @e && e0 <= maxExponent @e
 
-          (float, debug') = case e1' of
-            Underflow exponentUnderflow -> let
+    float :: Format b e m
+    (float, debug')
+      | (sigMult_normal || sigMult_overflow) && exp_resultInBounds = case er of
+          Result e -> let
+            (s, roundingOverflow) = roundEvenOverflow (intVal @m) s0
+            e' = e
+              & (if roundingOverflow then (+ 1) else id)
+              & (if sigMult_overflow then (+ 1) else id)
+            in (Format sign e' (bitArray s),
+                [ "normal"
+                , l "roundingOverflow" roundingOverflow
+                ])
+          _ -> (zero, ["when exp_resultInBounds is true, then it can't be under or overflow " <> show er])
 
-              in
-              (zero, [])
-            _ -> (zero, [])
+      | (sigMult_normal || sigMult_overflow) && not exp_resultInBounds = case er of
+          Overflow eod -> (Format sign maxBound 0, ["overflow can only be infinity"])
+          Underflow eud
+            | eud == 0 -> (zero, ["ERROR: underflow can't be zero"])
+            | otherwise -> -- is bound reachable
+              let
+              roundTo = eud + intVal @m + (if sigMult_overflow then 2 else 0) -- regular nounding + eod places for overflow + 2 if sigMult overflows
+                                                                 -- ^ this always correct?
+              (sn, roundingOverflow) = roundEvenOverflow (fromInteger roundTo) s0
+              (e, sb) = if roundingOverflow && not sigMult_overflow
+                then (1, bitArray @m sn)
+                else (0, bitArray @m sn)
+              in (Format sign e sb
+                 , [ "EXPONENT NOT IN BOUNDS"
+                   , l "roundTo, eud, intVal" (roundTo, eud, intVal @m)
+                   , l "s, rounded" $ bitArray @24 sn
+                   , l "roundingOverflow" roundingOverflow ])
+          _ -> (zero, [l "HERE1" er])
 
-          in (float,
-              [ "\nSUBNORMAL"
-              , l "hsb" hsb
-              , l "dNormal" dNormal
-              , l "e0'" e0'
-              , l "e1'" e1'
-              ] <> debug'
-             )
+      | sigMult_subnormal = let
+          dn = (intVal @m * 2) - s0hsb -- distance from being normal
+          in case er of
+          Result e ->
+            (zero, ["sigMult_subnormal", show er, prettyBin s0, l "dn" dn])
+          Underflow{} -> (zero, [])
+          Overflow _ -> (zero, [])
 
 
-      else case e1 of
-        Overflow{} -> (Format sign maxBound 0, ["OVERFLOW"]) -- exponent overflow means infinity
-        Underflow exponentUnderflow ->
-          let
-            roundTo = fromIntegral $ exponentUnderflow + ix -- round more to the amount of underflow
-            debug' =
-              [ "\nEXPONENT UNDERFLOW"
-              , l "roundTo" roundTo
-              , l "m" $ BitArray @24 n
-              , l "m" m
-              , l "roundingOverflow" roundingOverflow
-              ]
-            n = roundEven roundTo s0 :: Natural
-            roundingOverflow = testBit n (intVal @m)
-            m = BitArray n
-            float = if exponentUnderflow == 1 && roundingOverflow -- roundingOverflow can only improve exponent by an amount of 1
-              then Format sign 1 (clearBit m (intVal @m))
-              else Format sign 0 m
-
-          in (float, debug')
-
-        Result e -> let
-            hsb = highestSetBit s0
-            ix2 = intVal @m * 2
-            sigMultOverflow = hsb /= ix2
-            roundTo = if sigMultOverflow then ix + 1 else ix
-            s1 = roundEven (fromIntegral roundTo) s0
-            roundingOverflow = testBit s1 (intVal @m + 1)
-
-            m = BitArray (clearBit s1 (intVal @m))
-            float = if roundingOverflow || sigMultOverflow
-              then Format sign (e + 1) m
-              else Format sign e m
-
-          in (float,
-              [ "\nEXPONENT RESULT " <> show e
-              , l "highestSetBit" hsb
-              , l "roundTo (sigMultOverflow)" (roundTo, sigMultOverflow)
-              , l "s1 (rounded to roundTo)" $ prettyBinFrac (intVal @m) s1
-              , l "roundingOverflow" roundingOverflow
-              ])
+      | otherwise = (zero, ["TODO2"])
 
     debug =
-      [ "s0: " <> prettyBinFrac (intVal @m * 2) s0 <> " subnormalS0: " <> show subnormalS0
-      , "e0, unbiased: " <> unwords [show e0, "=", show (unbiasedExponent f1), "+", show (unbiasedExponent f2) <> ", min/max " <> show (minExponent @e) <> "/" <> show (maxExponent @e)]
-      , l "e1, bias result" e1
-      ] <> debug'
+      [ "s0: " <> prettyBinFrac (intVal @m * 2) s0 -- <> " subnormalS0: " <> show subnormalS0
+      , "e0: " <> unwords [show e0, "(" <> show (unbiasedExponent f1), "+", show (unbiasedExponent f2) <> ",", show (minExponent @e) <> "/" <> show (maxExponent @e), "min/max)"]
 
-highestSetBit :: Natural -> Int
-highestSetBit n = floor $ logBase (2 :: Native.Double) $ fromIntegral n
+      , l "\nsigMult_overflow" sigMult_overflow
+      , l "sigMult_normal" sigMult_normal
+      , l "sigMult_subnormal" sigMult_subnormal
+
+      , l "\nexp_resultInBounds" (exp_resultInBounds, er, case er of Result{} -> True; _ -> False)
+
+      , l "\ne0, minExponent" (e0, minExponent @e)
+
+      ] <> debug'
 
 divide :: (KnownNat b, KnownNat e, KnownNat m) => Format b e m -> Format b e m -> Format b e m
 divide _a b

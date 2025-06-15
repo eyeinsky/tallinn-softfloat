@@ -216,6 +216,15 @@ roundEven n a = if
     t0 = shiftR a n
     t1 = t0 + 1
 
+roundEvenOverflow :: forall a . (Bits a, Integral a) => Int -> a -> (a, Bool)
+roundEvenOverflow n a = (a', overflow)
+  where
+    a' = roundEven n a
+    overflow = (highestSetBit a - n) /= highestSetBit a'
+
+highestSetBit :: (Integral b, Integral a) => a -> b
+highestSetBit n = floor $ logBase (2 :: Double) $ fromIntegral n
+
 -- ** Instances for native floats
 
 -- | Read value of type @from@ as type @to@ via pointer. Used to cast
