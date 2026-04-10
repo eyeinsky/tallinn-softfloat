@@ -32,6 +32,15 @@ type Double     = Format    2       11       52    -- double-precision          
 type Binary128  = Format    2       15      112    -- quad-precision            16383
 type Binary256  = Format    2       19      236    -- octuple-precision        262143
 
+type KnownNats b e m = (KnownNat b, KnownNat e, KnownNat m)
+
+type family Soft f where
+  Soft Native.Float = Float
+  Soft Native.Double = Double
+
+type family Native f where
+  Native Float = Native.Float
+  Native Double = Native.Double
 
 type family MatchingWord a where
   MatchingWord Half = Word16
@@ -159,6 +168,20 @@ instance (KnownNat b, KnownNat e, KnownNat m) => Bits (Format b e m) where
       exponentWidth = intVal @e
       i' = i - mantissaWidth
 
+
+floatInt :: Format b e m -> Integer
+floatInt f = div n d
+  where
+    r = floatToRational f
+    n = numerator r
+    d = denominator r
+
+instance Ord (Format b e m) where
+  compare (Format s1 e1 m1) (Format s2 e2 m2) = error "instance Ord (Format b e m): not implemented"
+instance KnownNats b e m => Real (Format b e m) where
+instance KnownNats b e m => RealFrac (Format b e m) where
+  truncate = fromIntegral . floatInt
+
 instance FiniteBinary Half where
   type Width (Format 2 5 10) = 16
 instance FiniteBinary Float where
@@ -224,7 +247,7 @@ parseFloat
 parseFloat str = (
   [ l "input string" str ]
   <> debug <>
-  [ l "float bits" $ showFloatBits float
+  [ l "float bits" $ showFloatBits1 float
   , l "float" $ float
   ]
   , (float, rest))
@@ -440,11 +463,18 @@ showDescribeFloat float@(Format sign e m)
 describeFloat :: Format b e m -> String
 describeFloat f = snd $ showDescribeFloat f
 
-showFloatBits :: forall b e m . Format b e m -> String
-showFloatBits (Format sign e m) = intercalate "_" [[bitChar sign], bitStringFinite e, bitStringFinite m]
+showFloatBits1 :: forall b e m . Format b e m -> String
+showFloatBits1 (Format sign e m) = intercalate "_" [[bitChar sign], bitStringFinite e, bitStringFinite m]
 
 showFloatBits_ :: Format b e m -> String
-showFloatBits_ = filter (/= '_') . showFloatBits
+showFloatBits_ = filter (/= '_') . showFloatBits1
+
+-- * Show Float
+
+class ShowFloatBits a where showFloatBits :: a -> String
+instance ShowFloatBits (Format b e m) where showFloatBits = showFloatBits1
+instance ShowFloatBits Native.Float where showFloatBits = undefined
+instance ShowFloatBits Native.Double where showFloatBits = undefined
 
 -- * Unsorted
 
@@ -464,13 +494,6 @@ floatToRational f@(Format sign exponent mantissa) = case exponent of
 rationalMantissa :: BitArray w -> Rational
 rationalMantissa m = 1 + asBinaryFraction m
 
-floatInt :: Format b e m -> Integer
-floatInt f = div n d
-  where
-    r = floatToRational f
-    n = numerator r
-    d = denominator r
-
 -- * NaN signaling
 
 signalingBound :: forall b m . (KnownNat b, KnownNat m) => BitArray m
@@ -482,7 +505,7 @@ snanPayload (Format _ _ (BitArray m)) = if not $ testBit m ix
   else Nothing
   where ix = intVal @m - 1
 
--- * Predefined
+-- * Constants
 
 -- | 1: Mantissa is zero because it has an implicit 1 in
 -- front. exponent is exactly bias, as then it will be 1 * 10_2^(bias - bias) = 1

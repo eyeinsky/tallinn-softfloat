@@ -53,14 +53,19 @@ main = Tasty.defaultMain $ Tasty.testGroup "Softfloat"
     , Tasty.testProperty "Division" prop_division
     , Tasty.testProperty "Addition" prop_addition
     , Tasty.testProperty "Subtraction" prop_subtraction
+    , Tasty.testProperty "Truncation" prop_truncation
     ]
 
   -- , Tasty.testProperty "parse/show matches native floats" prop_parseShowRoundtripNativeFloat
   , Tasty.testProperty "normalize mantissa" prop_normalizeMantissa
 
   -- rounding
-  , Tasty.testProperty "bitlist rounding unit test" unitTest_bitlistRounding
-  , Tasty.testProperty "no rounding" prop_shorterValuesNeedNoRounding
+  , Tasty.testGroup "Rounding"
+    [ Tasty.testProperty "bitlist rounding unit test" unitTest_bitlistRounding
+    , Tasty.testProperty "no rounding" prop_shorterValuesNeedNoRounding
+    -- soft vs native
+    , Tasty.testProperty "soft vs native" prop_identicalSoftAndNativeRounding
+    ]
   ]
 
 -- * Parsing
@@ -214,11 +219,13 @@ hot = do
   -- H.recheckAt (H.Seed 5030941632379584368 14175235372969874745) "50:bA3fDcDc2IdC2" prop_multiply
   -- H.recheckAt (H.Seed 697175833316279477 8095718973563675341) "65:dAgCfDcE2c2" prop_multiply
   -- H.recheckAt (H.Seed 18221922921332819946 15611580718735075015) "68:bA6bC2a5Dc2DbA" prop_multiply -- sigMultOverflow
-  H.recheckAt (H.Seed 10984703261618746247 10933244729112182337) "94:cAbCdA19" prop_multiply -- normal * subnormal = subnormal
-  -- runTest prop_multiply
+  -- H.recheckAt (H.Seed 10984703261618746247 10933244729112182337) "94:cAbCdA19" prop_multiply -- normal * subnormal = subnormal
+
+  runTest "prop_truncation" prop_truncation
 
 unitTest_addBias :: H.Property
 unitTest_addBias = unitTest $ do
+  (sd, nd) <- H.forAll (softNativePair @Soft.Double)
   return ()
 
 unitTest_BitsInstance :: H.Property
@@ -298,7 +305,7 @@ prop_multiply :: H.Property
 -- prop_multiply = H.property $ do
 prop_multiply = H.withTests 10000 $ H.property $ do
 -- prop_multiplication = unitTest $ do
-  (sf1, nf1) <- H.forAll softNativePair
+  (sf1, nf1) <- H.forAll (softNativePair @Soft.Float)
   (sf2, nf2) <- H.forAll softNativePair
   -- let sf = sf1 * sf2
   let (debug, sf) = multiply sf1 sf2
@@ -331,6 +338,13 @@ prop_division :: H.Property
 prop_division = H.property $ do
   return ()
 
+prop_truncation :: H.Property
+prop_truncation = H.property $ do
+  (sf, nf) <- H.forAll $ softNativePair @Soft.Float
+  H.footnote $ show ((sf, nf), (truncate sf, truncate nf))
+  H.footnote $ show ((sf, nf), (truncate sf, truncate nf))
+  truncate sf === truncate nf
+
 -- * Rounding
 
 unitTest_bitlistRounding :: H.Property
@@ -357,7 +371,12 @@ prop_shorterValuesNeedNoRounding = H.property $ do
   moreThanBitsLength <- H.forAll $ Gen.integral $ Range.linear @Int bitsLength (bitsLength + 10)
   roundBits moreThanBitsLength bits === (bits, False)
 
--- | Comprehensive test for `roundBits`.
+prop_identicalSoftAndNativeRounding :: H.Property
+prop_identicalSoftAndNativeRounding = H.property $ do
+--  (s, n) <- softNativePair @Soft.Double
+  1 === 1
+
+-- | Comprehensive test for `roundBits`. TODO: why not listed in the tests?
 prop_longerValuesRoundCorrectly :: H.Property
 prop_longerValuesRoundCorrectly = H.property $ do
   roundToLength <- H.forAll $ Gen.integral $ Range.linear @Int 0 10
@@ -394,7 +413,7 @@ prop_longerValuesRoundCorrectly = H.property $ do
         extraDigit === False
     | otherwise -> H.footnote "This never happens." >> H.failure
 
--- * Helpers
+-- * Generators
 
 anyFloat :: forall m . H.MonadGen m => m Soft.Float
 anyFloat = do
@@ -411,17 +430,21 @@ anyFloat2
 anyFloat2 = do
   fromBits_ <$> (Gen.enumBounded @m' @w)
 
--- yyy
 
-softNativePair :: (H.MonadGen m') => m' (Soft.Float, Native.Float)
+type Z b e m = (KnownNat b, KnownNat e, KnownNat m)
+
+softNativePair
+  :: forall soft m' b e m
+  . ( soft ~ Format b e m, Z b e m
+    , Bits (MatchingWord soft)
+    , Storable (MatchingWord soft)
+    , Storable (Native soft)
+    , H.MonadGen m') => m' (soft, Native soft)
 softNativePair = do
-  soft <- normalSoftfloat
-  return (soft, viaStorable (toBits soft))
+  soft :: soft <- normalSoftfloat
+  return (soft, viaStorable (toBits soft :: MatchingWord soft))
 
-softToNative :: Soft.Float -> Native.Float
-softToNative soft = viaStorable (toBits soft)
-
--- | Generate a regular finite float, i., not a special value (nan, inf) nor a subnormal finite float.
+-- | Generate a normal finite float. I.e, neither a special value (nan, inf) nor a subnormal.
 normalSoftfloat :: forall m' b e m . (H.MonadGen m', KnownNat b, KnownNat e, KnownNat m) => m' (Format b e m)
 normalSoftfloat =
   Format
@@ -461,3 +484,8 @@ randomDecimalString = do
       frac :: Word64 <- Gen.integral $ Range.linear minBound maxBound
       return $ int <> "." <> show frac
     else return int
+
+-- * Helpers
+
+softToNative :: Soft.Float -> Native.Float
+softToNative soft = viaStorable (toBits soft)

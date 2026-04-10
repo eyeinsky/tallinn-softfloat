@@ -1,6 +1,7 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE TypeFamilyDependencies #-}
+{-# LANGUAGE ForeignFunctionInterface #-}
 
 module Data.Bit where
 
@@ -12,6 +13,8 @@ import Numeric.Natural
 import Foreign.Marshal.Alloc
 import Foreign.Ptr
 import Foreign.Storable
+import Foreign.C.Types
+import Data.Coerce
 import Data.Word
 import System.IO.Unsafe
 import Debug.Trace
@@ -235,9 +238,9 @@ viaStorableIO v = alloca $ \(ptr :: Ptr from) -> poke ptr v *> peek (castPtr ptr
 viaStorable :: forall from to . (Storable from, Storable to) => from -> to
 viaStorable = unsafePerformIO . viaStorableIO
 
-instance Bits Float where
+instance Bits Float where -- use castFloatToWord32#?
   testBit f ix = testBit (viaStorable @Float @Word32 f) ix
-instance Bits Double where
+instance Bits Double where -- use castDoubleToWord64#?
   testBit f ix = testBit (viaStorable @Double @Word64 f) ix
 
 -- instance Enum Float where
@@ -266,3 +269,12 @@ instance FiniteBinary Double where type Width Double = 64
 
 -- instance (Bits a, FiniteBinary a, KnownNat (Width a)) => FiniteBits a where
 --   finiteBitSize _ = fromIntegral (natVal @(Width a) Proxy)
+
+-- * FFI
+
+foreign import ccall unsafe "cast_double_to_float"
+  cast_double_to_float :: CDouble -> CFloat
+
+-- | IEEE 754 conformant conversion from double to single precision float.
+castDoubleToFloat :: Double -> Float
+castDoubleToFloat = coerce . cast_double_to_float . coerce
