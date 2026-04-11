@@ -61,8 +61,6 @@ instance Ord (BitArray w) where compare (BitArray a) (BitArray b) = compare a b
 
 instance FiniteBinary (BitArray w) where
   type Width (BitArray w) = w
-instance KnownNat w => FiniteBits (BitArray w) where
-  finiteBitSize _ = intVal @w
 
 instance Show (BitArray w) where
   show (BitArray a) = "0b" <> foldl (\acc i -> boolBitChar (testBit a i) : acc) [] [0 .. (intVal @w) - 1]

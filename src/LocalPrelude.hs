@@ -4,7 +4,7 @@ module LocalPrelude
   ) where
 
 import Prelude as Export hiding (exponent, significand)
-import Data.Proxy
+import Data.Proxy as Export
 import GHC.TypeLits
 import Debug.Trace as Export
 import Numeric.Natural as Export

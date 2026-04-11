@@ -4,6 +4,7 @@ module Data.Float where
 import LocalPrelude hiding (Float, Double)
 import LocalPrelude qualified as Native
 
+import Foreign.Storable
 import Text.Read
 import GHC.TypeLits
 import Data.Kind
@@ -32,7 +33,18 @@ type Double     = Format    2       11       52    -- double-precision          
 type Binary128  = Format    2       15      112    -- quad-precision            16383
 type Binary256  = Format    2       19      236    -- octuple-precision        262143
 
+type family PrecisionLabel a where
+  PrecisionLabel Half = "half"
+  PrecisionLabel Float = "single"
+  PrecisionLabel Double = "double"
+  PrecisionLabel (Format b e m) = "b e m"
+
+precisionLabel :: forall f . HasPrecisionLabel f => String
+precisionLabel = symbolVal (Proxy @(PrecisionLabel f)) ++ " precision, soft"
+
 type KnownNats b e m = (KnownNat b, KnownNat e, KnownNat m)
+
+type HasPrecisionLabel a = KnownSymbol (PrecisionLabel a)
 
 type family Soft f where
   Soft Native.Float = Float
@@ -49,6 +61,11 @@ type family MatchingWord a where
 
   MatchingWord Native.Float = Word32
   MatchingWord Native.Double = Word64
+
+type family FloatFromWidth (n :: Nat) where
+  FloatFromWidth 16 = Half
+  FloatFromWidth 32 = Float
+  FloatFromWidth 64 = Double
 
 -- * Bias
 
@@ -108,6 +125,7 @@ exponentSignificand Format{exponent, mantissa} = if exponent == 0
 
 -- * Instances
 
+-- TODO: What does IEEE-754 specify?
 instance Eq (Format b e m) where
   Format s e m == Format s' e' m' = s == s' && e == e' && m == m'
 
@@ -127,11 +145,11 @@ minExpBiased = 1
 minExponent :: forall e a . (KnownNat e, Num a) => a
 minExponent = 1 - fromIntegral (bias @e)
 
-instance (KnownNat b, KnownNat e, KnownNat m) => Bounded (Format b e m) where
+instance (KnownNats b e m) => Bounded (Format b e m) where
   minBound = Format I maxExpBiased (maxBound :: BitArray m)
   maxBound = Format O maxExpBiased (maxBound :: BitArray m)
 
-instance (KnownNat b, KnownNat e, KnownNat m) => FiniteBits (Format b e m) where
+instance (KnownNats b e m) => FiniteBits (Format b e m) where
   finiteBitSize _ = intVal @e + intVal @m + 1
 
 instance (KnownNat b, KnownNat e, KnownNat m) => Bits (Format b e m) where
@@ -169,18 +187,25 @@ instance (KnownNat b, KnownNat e, KnownNat m) => Bits (Format b e m) where
       i' = i - mantissaWidth
 
 
-floatInt :: Format b e m -> Integer
-floatInt f = div n d
-  where
-    r = floatToRational f
-    n = numerator r
-    d = denominator r
+
 
 instance Ord (Format b e m) where
   compare (Format s1 e1 m1) (Format s2 e2 m2) = error "instance Ord (Format b e m): not implemented"
 instance KnownNats b e m => Real (Format b e m) where
-instance KnownNats b e m => RealFrac (Format b e m) where
+instance (KnownNats b e m, HasPrecisionLabel (Format b e m)) => RealFrac (Format b e m) where
   truncate = fromIntegral . floatInt
+floatInt :: Format b e m -> Integer
+floatInt f = quot n d
+  where
+    r = floatToRational f
+    n = numerator r :: Integer
+    d = denominator r :: Integer
+
+instance (KnownNats b e m, f ~ Format b e m, KnownNat (Width f), HasPrecisionLabel f) => Storable (Format b e m) where
+  sizeOf = finiteBitSize
+  alignment _  = quot (intVal @(Width f)) 2 -- TODO: correct?
+  peek = error $ "TODO: Storable.peek " ++ precisionLabel @f
+  poke = error $ "TODO: Storable.poke " ++ precisionLabel @f
 
 instance FiniteBinary Half where
   type Width (Format 2 5 10) = 16
@@ -193,12 +218,18 @@ instance FiniteBinary Binary128 where
 instance FiniteBinary Binary256 where
   type Width (Format 2 19 236) = 256
 
+type family ToWord (n :: Nat) where
+  ToWord 8 = Word8
+  ToWord 16 = Word16
+  ToWord 32 = Word32
+  ToWord 64 = Word64
+
 -- | Read a float from a value having a binary representation, i.e, a @Bits@ instance.
 -- TODO add tests
-fromBits_
-  :: forall bits b e m . (Bits bits, KnownNat b, KnownNat e, KnownNat m)
+fromBits
+  :: forall bits b e m . (Bits bits, KnownNats b e m)
   => bits -> Format b e m
-fromBits_ source = Format
+fromBits source = Format
   { sign = if testBit source (mw + ew) then I else O
   , exponent = integerBits source mw (mw + ew)
   , mantissa = integerBits source 0 mw
@@ -213,8 +244,8 @@ fromBits_ source = Format
         mapping :: [(Int, Int)]
         mapping = zip [from .. (to - 1) ] [0..]
 
-toBits :: (FiniteBits f, Bits (MatchingWord f)) => f -> MatchingWord f
-toBits f = go 0 zeroBits
+toWord :: forall a w . (FiniteBits a, w ~ ToWord (Width a), Bits w) => a -> w
+toWord f = go 0 (zeroBits :: w)
   where
     go ix v = if ix == finiteBitSize f
       then v
@@ -242,12 +273,12 @@ lxs label cap xs = let
 
 -- FIXME this doesn't work fractions with zeroes in front of of the fraction part, i.e 0.0625 parses to 0.625
 parseFloat
-  :: forall b e m . (KnownNat b, KnownNat e, KnownNat m)
+  :: forall b e m . (KnownNats b e m, HasPrecisionLabel (Format b e m))
   => String -> ([String], (Format b e m, String))
 parseFloat str = (
   [ l "input string" str ]
   <> debug <>
-  [ l "float bits" $ showFloatBits1 float
+  [ l "float bits" $ showFloatBits float
   , l "float" $ float
   ]
   , (float, rest))
@@ -332,10 +363,10 @@ rationalToBits i
     i2 = i * 2
     recurse = rationalToBits
 
-instance (KnownNat b, KnownNat e, KnownNat m) => Read (Format b e m) where
+instance (KnownNats b e m, HasPrecisionLabel (Format b e m)) => Read (Format b e m) where
   readsPrec _n str = [snd $ parseFloat str]
 
-instance (KnownNat b, KnownNat e, KnownNat m) => Fractional (Format b e m) where
+instance (KnownNats b e m, HasPrecisionLabel (Format b e m)) => Fractional (Format b e m) where
   (/) = u
   recip = u
   fromRational r = f
@@ -463,18 +494,27 @@ showDescribeFloat float@(Format sign e m)
 describeFloat :: Format b e m -> String
 describeFloat f = snd $ showDescribeFloat f
 
-showFloatBits1 :: forall b e m . Format b e m -> String
-showFloatBits1 (Format sign e m) = intercalate "_" [[bitChar sign], bitStringFinite e, bitStringFinite m]
-
-showFloatBits_ :: Format b e m -> String
-showFloatBits_ = filter (/= '_') . showFloatBits1
-
 -- * Show Float
 
 class ShowFloatBits a where showFloatBits :: a -> String
-instance ShowFloatBits (Format b e m) where showFloatBits = showFloatBits1
-instance ShowFloatBits Native.Float where showFloatBits = undefined
-instance ShowFloatBits Native.Double where showFloatBits = undefined
+instance (KnownNats b e m, KnownSymbol (PrecisionLabel (Format b e m))) => ShowFloatBits (Format b e m) where
+  showFloatBits a = chunkedBitString [1, intVal @e, intVal @m] a ++ " (" ++ symbolVal (Proxy @(PrecisionLabel (Format b e m))) ++ " precision, soft)"
+instance ShowFloatBits Native.Float where
+  showFloatBits a = chunkedBitString [1,8,23] a ++ " (single precision, native)"
+instance ShowFloatBits Native.Double where
+  showFloatBits a = chunkedBitString [1,11,52] a ++ " (double precision, native)"
+
+chunkedBitString :: FiniteBits a => [Int] -> a -> String
+chunkedBitString ixs a = go ixs (bitStringFinite a)
+  where
+    go ixs xs
+      | [] <- ixs = xs
+      | [] <- xs = xs
+      | ix : ixs' <- ixs, _ : _ <- xs = case splitAt ix xs of
+          (prefix, suffix) -> case suffix of
+            _ : _ -> prefix ++ ('_' : go ixs' suffix)
+            "" -> prefix
+
 
 -- * Unsorted
 
@@ -509,23 +549,29 @@ snanPayload (Format _ _ (BitArray m)) = if not $ testBit m ix
 
 -- | 1: Mantissa is zero because it has an implicit 1 in
 -- front. exponent is exactly bias, as then it will be 1 * 10_2^(bias - bias) = 1
-one :: forall b e m . (KnownNat b, KnownNat e, KnownNat m) => Format b e m
+one :: forall b e m . KnownNats b e m => Format b e m
 one = Format { sign = O, exponent = bias @e, mantissa = 0 }
 
-zero :: forall b e m . (KnownNat b, KnownNat e, KnownNat m) => Format b e m
+zero :: forall b e m . KnownNats b e m => Format b e m
 zero = Format { sign = O, exponent = 0, mantissa = 0 }
 
+nzero :: forall b e m . KnownNats b e m => Format b e m
+nzero = (zero :: Format b e m) {sign = I}
+
 -- | Positive infinity: exponent is all-ones, mantissa is all-zeroes.
-inf :: forall b e m . (KnownNat b, KnownNat e, KnownNat m) => Format b e m
+inf :: forall b e m . KnownNats b e m => Format b e m
 inf = Format { sign = O, exponent = maxBound, mantissa = 0 }
 
+ninf :: forall b e m . KnownNats b e m => Format b e m
+ninf = negate (inf :: Format b e m)
+
 -- | NaN is like infinity, but with a non-zero mantissa.
-nan, qnan :: forall b e m . (KnownNat b, KnownNat e, KnownNat m) => Format b e m
+nan, qnan :: forall b e m . KnownNats b e m => Format b e m
 nan = (inf @b @e @m) { mantissa = setBit 0 (intVal @m - 1) }
 qnan = nan
 
 -- | Signaling NaN has most significant bit zero, the rest holds argument data.
-snan :: forall b e m m' . (KnownNat b, KnownNat e, KnownNat m, KnownNat m', m' <= m - 1) => BitArray m' -> Format b e m
+snan :: forall b e m m' . (KnownNats b e m, KnownNat m', m' <= m - 1) => BitArray m' -> Format b e m
 snan (BitArray data_) = (inf @b @e @m) { mantissa = BitArray data_ }
 
 -- * Predicates

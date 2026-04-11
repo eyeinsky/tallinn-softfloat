@@ -161,7 +161,7 @@ bitStringFinite = map bitChar . bitListFinite
 
 -- | Print value having a FiniteBits instance as binary literal, e.g 0b0110..
 binaryLiteral :: FiniteBits a => a -> String
-binaryLiteral a = "0b" <> map bitChar (bitListFinite a)
+binaryLiteral a = "0b" <> bitStringFinite a
 
 binaryLiteralChunked :: (Bits a, Integral a) => [Int] -> a -> String
 binaryLiteralChunked ixs a = go ixs (dropWhile (== O) $ bitListIntegral a)
@@ -267,8 +267,8 @@ instance FiniteBinary Word64 where type Width Word64 = 64
 instance FiniteBinary Float  where type Width Float  = 32
 instance FiniteBinary Double where type Width Double = 64
 
--- instance (Bits a, FiniteBinary a, KnownNat (Width a)) => FiniteBits a where
---   finiteBitSize _ = fromIntegral (natVal @(Width a) Proxy)
+instance {-# OVERLAPPABLE #-} (Bits a, FiniteBinary a, KnownNat (Width a)) => FiniteBits a where
+   finiteBitSize _ = fromIntegral (natVal @(Width a) Proxy)
 
 -- * FFI
 
