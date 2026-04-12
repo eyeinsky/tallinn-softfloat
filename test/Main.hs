@@ -1,18 +1,19 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE MagicHash #-}
 module Main where
 
 import LocalPrelude
-import Prelude qualified as Native (Float, Double)
+import Prelude qualified as Native
 import Data.Word
 import Control.Monad
 import Control.Monad.IO.Class
 import Control.Concurrent
 import GHC.TypeLits
-import System.IO.Unsafe
 import Foreign.Storable
-import Text.Printf
+import Foreign.Marshal
+import GHC.Exts (double2Float#, Double(D#), Float(F#))
 
 import Hedgehog ((===))
 import Hedgehog qualified as H
@@ -21,12 +22,12 @@ import Hedgehog.Range qualified as Range
 import Test.Tasty qualified as Tasty
 import Test.Tasty.Hedgehog qualified as Tasty
 
-import Data.BitArray hiding (multiply)
+import Data.BitArray
 import Data.Float hiding (Float, Double)
 import Data.Float qualified as Soft
 import Data.Bits
 
-import Main_DataBits (bit_, unitTest, runTest, runTests)
+import Main_DataBits (bit_, unitTest, runTest)
 import Main_DataBits qualified
 
 -- import System.Random.SplitMix
@@ -49,12 +50,12 @@ main = Tasty.defaultMain $ Tasty.testGroup "Softfloat"
     ]
 
   , Tasty.testGroup "Misc"
-    [ Tasty.testProperty "generate subnormals" $ H.property $ do
-        H.forAll (genSubnormal @Soft.Half) >>= H.assert . isSubnormal
-        H.forAll (genSubnormal @Soft.Float) >>= H.assert . isSubnormal
-        H.forAll (genSubnormal @Soft.Double) >>= H.assert . isSubnormal
-        H.forAll (genSubnormal @Soft.Binary128) >>= H.assert . isSubnormal
-        H.forAll (genSubnormal @Soft.Binary256) >>= H.assert . isSubnormal
+    [ Tasty.testProperty "Storable peek/poke roundtrip" prop_storablePeekPokeRoundtrip ]
+
+  , Tasty.testGroup "Generators & misc"
+    [ Tasty.testProperty "subnormals" prop_generateSubnormals
+    , Tasty.testProperty "quiet NaNs" prop_qnans
+    , Tasty.testProperty "signalling NaNs" prop_snans
     ]
 
   , Tasty.testGroup "Arithmetic"
@@ -77,6 +78,43 @@ main = Tasty.defaultMain $ Tasty.testGroup "Softfloat"
     ]
   ]
 
+-- * Misc
+
+prop_generateSubnormals :: H.Property
+prop_generateSubnormals = H.property $ do
+  H.forAll (anyNativeWidth genSubnormal) >>= withAnyWidth (H.assert . isSubnormal)
+  H.forAll (genSubnormal @Soft.Binary128) >>= H.assert . isSubnormal
+  H.forAll (genSubnormal @Soft.Binary256) >>= H.assert . isSubnormal
+
+prop_qnans :: H.Property
+prop_qnans = H.property $ do
+  H.forAll (anyNativeWidth genQNan) >>= withAnyWidth (H.assert . isQNan)
+
+prop_snans :: H.Property
+prop_snans = H.property $ do
+  H.forAll (anyNativeWidth genSNan) >>= withAnyWidth (H.assert . isJust . snanPayload)
+
+prop_storablePeekPokeRoundtrip :: H.Property
+prop_storablePeekPokeRoundtrip = H.property $ do
+  H.forAll (anyNativeWidth genFloat) >>= \case
+    F16 f -> go f
+    F32 f -> go f
+    F64 f -> go f
+  where
+    go :: forall b e m .
+      ( KnownNats b e m
+      , KnownNat (Width (Format b e m))
+      , Storable (ToWord (Width (Format b e m)))
+      , Bits (ToWord (Width (Format b e m)))
+      , HasPrecisionLabel (Format b e m)
+      ) => Format b e m -> H.PropertyT IO ()
+    go f = do
+      f' <- liftIO $ do
+        ptr <- malloc
+        poke ptr f
+        peek ptr
+      f === f'
+
 -- * Parsing
 
 prop_parsingRountripNativeFloat :: H.Property
@@ -94,7 +132,7 @@ compareParsingAgainstNative
   . ( Storable native, Read native, Show native            -- native type, e.g Float, Double
     , Storable word, FiniteBits word                       -- matching word, e.g Word32, Word64
     , FiniteBits softfloat, Read softfloat, Show softfloat, Bounded softfloat -- matching softfloat, e.g Finite 2 8 23
-    , softfloat ~ Format b e m, KnownNat e
+    , softfloat ~ Format b e m, KnownNat e, Integral word, KnownNats b e m, HasPrecisionLabel (Format b e m)
     ) => String -> H.PropertyT IO ()
 compareParsingAgainstNative strFloat = do
   let native = readLabel "native" strFloat :: native
@@ -107,18 +145,12 @@ compareParsingAgainstNative strFloat = do
       integerDigits = show . length . dropWhile (== '-') . takeWhile (/= '.')
       notes = unlines
         [ "strFloat " <> strFloat <> " (" <> integerDigits strFloat <> ")"
-        , "native " <> showBits (intVal @e) w <> " " <> show native
-        , "soft   " <> showBits (intVal @e) w' <> " " <> show w' <> " " <> isBoundMsg
+        , "native " <> binaryLiteralChunked [1, intVal @e] w <> " " <> show native
+        , "soft   " <> showFloatBits w' <> " " <> show w' <> " " <> isBoundMsg
         ]
   -- liftIO $ threadDelay 10000 >> putStrLn notes
   H.footnote notes
   bitListFinite w === bitListFinite w'
-  where
-    -- showBits :: Int -> Format b e m -> String
-    showBits v x = unwords [show (head x'), show e, show m]
-      where
-        x' = bitListFinite x
-        (e, m) = splitAt v (tail x')
 
 -- | Test `normalizeMantissa`, a function used in float parsing, by
 -- giving it an integer part bits and fraction part bits and testing
@@ -168,8 +200,8 @@ unitTest_floatParsing = unitTest $ do
   showDescribeFloat' (Format I maxBound 0) === ("-inf", "negative infinity")
   showDescribeFloat' (Format O maxBound 1) === ("snan", "positive signaling nan")
   showDescribeFloat' (Format I maxBound 1) === ("-snan", "negative signaling nan")
-  showDescribeFloat' (Format O maxBound (1 + signalingBound @2 @10)) === ("nan", "positive nan")
-  showDescribeFloat' (Format I maxBound (1 + signalingBound @2 @10)) === ("-nan", "negative nan")
+  showDescribeFloat' (Format O maxBound (1 + signalingBound @2 @10)) === ("nan", "positive quiet nan")
+  showDescribeFloat' (Format I maxBound (1 + signalingBound @2 @10)) === ("-nan", "negative quiet nan")
 
   let f12 = read' "1.2"
   f12 === fromBits @Integer 0b0011110011001101
@@ -216,36 +248,24 @@ prop_parseShowRoundtripNativeFloat = H.property $ do
 
 type Small = Format 2 3 3
 
+delayed :: MonadIO m => IO a -> m a
 delayed a = liftIO $ do
   threadDelay 1000
   a
 
 hot :: IO ()
 hot = do
-  main
-  -- runTest unitTest_BitsInstance
-  -- runTest unitTest_multiply
+  -- main
+  -- runTest "uinitTest_identicalSoftAndNativeRounding" uinitTest_identicalSoftAndNativeRounding
+  runTest "prop_identicalSoftAndNativeRounding" prop_identicalSoftAndNativeRounding
+  -- runTest "prop_identicalSoftAndNativeRounding" prop_identicalSoftAndNativeRounding
   -- H.recheckAt (H.Seed 16975537929181517343 15631089919146336913) "38:aC2bAiH20" prop_multiply
-  -- H.recheckAt (H.Seed 5030941632379584368 14175235372969874745) "50:bA3fDcDc2IdC2" prop_multiply
-  -- H.recheckAt (H.Seed 697175833316279477 8095718973563675341) "65:dAgCfDcE2c2" prop_multiply
-  -- H.recheckAt (H.Seed 18221922921332819946 15611580718735075015) "68:bA6bC2a5Dc2DbA" prop_multiply -- sigMultOverflow
-  -- H.recheckAt (H.Seed 10984703261618746247 10933244729112182337) "94:cAbCdA19" prop_multiply -- normal * subnormal = subnormal
-
-  -- runTest "prop_truncation" prop_truncation
-  -- H.recheckAt (H.Seed 11210556986244900171 5748277629928467001) "3:bCb17" prop_multiply -- normal * subnormal = subnormal
   -- let f@(Format s e m) = fromBits @Natural 1_00000000_00000000000000000000001 :: Soft.Float
-  -- print (s, e, m) -- (I,0b00000000,0b00000000000000000000001)
-  -- print (exponentSignificand f) -- (-126,1) 0b00000000 - 0b01111111 = -127, 1
-  -- print (unbiasedExponent f)
-  -- print (2^^(unbiasedExponent f), asBinaryFraction $ mantissa f)
-  -- print $ floatToRational f -- (-1) % 713623846352979940529142984724747568191373312
 
-  -- print $ truncate f
-
-unitTest_addBias :: H.Property
-unitTest_addBias = unitTest $ do
-  (sd, nd) <- H.forAll (softNativePair @Soft.Double)
-  return ()
+-- unitTest_addBias :: H.Property
+-- unitTest_addBias = unitTest $ do
+--   (sd, nd) <- H.forAll (softNativePair @Soft.Double)
+--   return ()
 
 unitTest_BitsInstance :: H.Property
 unitTest_BitsInstance = unitTest $ do
@@ -331,19 +351,18 @@ prop_multiply = H.withTests 10000 $ H.property $ do
   let nf = nf1 * nf2
       nfw = viaStorable @Float @Word32 nf
 
-  let notes = unlines $ debug <>
-        [ "native: " <> show nf <> " = " <> show nf1 <> " * " <> show nf2
-        , l "binaryNatural soft   bits" $ BitArray @32 (binaryNatural sf)
-        , l "binaryNatural native bits" $ BitArray @32 (binaryNatural nfw)
-        ]
+  let
+      -- notes = unlines $ debug <>
+      --   [ "native: " <> show nf <> " = " <> show nf1 <> " * " <> show nf2
+      --   , l "binaryNatural soft   bits" $ BitArray @32 (binaryNatural sf)
+      --   , l "binaryNatural native bits" $ BitArray @32 (binaryNatural nfw)
+      --   ]
       note = makeNote sf1 sf2 (fromBits nfw) sf debug
   -- liftIO $ threadDelay 10000 >> putStrLn notes
 
   H.footnote note
 
   binaryNatural sf === binaryNatural nfw
-
-bl a = binaryLiteralChunked [1, 8, 23] a
 
 prop_addition :: H.Property
 prop_addition = H.property $ do
@@ -365,7 +384,7 @@ prop_truncation = H.property $ do
     , "sf: " ++ showFloatBits sf
     , "nf: " ++ showFloatBits nf
     ]
-  truncate sf === truncate nf
+  truncate @_ @Integer sf === truncate nf
 
 -- * Rounding
 
@@ -393,10 +412,35 @@ prop_shorterValuesNeedNoRounding = H.property $ do
   moreThanBitsLength <- H.forAll $ Gen.integral $ Range.linear @Int bitsLength (bitsLength + 10)
   roundBits moreThanBitsLength bits === (bits, False)
 
+uinitTest_identicalSoftAndNativeRounding :: H.Property
+uinitTest_identicalSoftAndNativeRounding = unitTest $ do
+  testDoubleFloatRounding (Format O maxBound (setMSB 0 + 12345678919) :: Soft.Double)
+
+testDoubleFloatRounding sd = do
+  let
+      nd = toNative sd
+      nf = double2Float nd
+      sf = roundFloat sd :: Soft.Float
+
+  H.footnote $ unlines
+    [ "sd " <> showFloatBits sd <> " " <> showCat sd
+    , "nd " <> showFloatBits nd <> " " <> show nd
+    , "nf " <> showFloatBits nf <> " " <> show nf
+    , "sf " <> showFloatBits sf <> " " <> showCat sf
+    ]
+
+  toWord nf === toWord sf -- !!! Need to compare the underlying binary form as identical IEEE-754 NaNs don't compare equal to each other.
+
+showCat :: Format b e m -> String
+showCat f = show f <> ", " <> snd (showDescribeFloat f)
+
 prop_identicalSoftAndNativeRounding :: H.Property
 prop_identicalSoftAndNativeRounding = H.property $ do
---  (s, n) <- softNativePair @Soft.Double
-  1 === 1
+  sd :: Soft.Double <- H.forAll genFloat
+  testDoubleFloatRounding sd
+
+double2Float :: Double -> Float
+double2Float (D# d) = F# (double2Float# d)
 
 -- | Comprehensive test for `roundBits`. TODO: why not listed in the tests?
 prop_longerValuesRoundCorrectly :: H.Property
@@ -437,18 +481,10 @@ prop_longerValuesRoundCorrectly = H.property $ do
 
 -- * Generators
 
-anyFloat :: forall b e m m' . (KnownNats b e m, H.MonadGen m') => m' (Format b e m)
-anyFloat = Gen.choice $ genNormal : genSubnormal : map pure [zero, negate zero, inf, negate inf, nan]
+-- ** Basic
 
-softNativePair
-  :: forall soft w {m'} {b} {e} {m}
-  . ( soft ~ Format b e m, KnownNats b e m
-    , Storable soft
-    , Storable (Native soft)
-    , H.MonadGen m') => m' (soft, Native soft)
-softNativePair = do
-  soft :: soft <- anyFloat
-  return (soft, viaStorable @soft @(Native soft) soft)
+genFloat :: forall b e m m' . (KnownNats b e m, H.MonadGen m') => m' (Format b e m)
+genFloat = Gen.choice $ genNormal : genSubnormal : map pure [zero, negate zero, inf, negate inf, nan]
 
 -- | Generate a normal finite float. I.e, neither a special value (nan, inf) nor a subnormal.
 genNormal :: forall m' b e m . (H.MonadGen m', KnownNats b e m) => m' (Format b e m)
@@ -459,11 +495,51 @@ genNormal =
     <*> Gen.integral (Range.linear 0 maxBound)
 
 genSubnormal :: forall f m' b e m . (f ~ Format b e m, H.MonadGen m', KnownNats b e m) => m' (Format b e m)
-genSubnormal =
-  Format
-    <$> bit_
-    <*> pure 0
-    <*> Gen.integral (Range.linear 0 maxBound)
+genSubnormal = formatEMS 0 <$> Gen.integral (Range.linear 1 maxBound) <*> bit_
+
+formatEMS :: (KnownNats b e m) => BitArray e -> BitArray m -> Bit -> Format b e m
+formatEMS e m s = Format s e m
+
+-- TODO: add tests
+genInf, genNan, genQNan :: forall m' b e m . (H.MonadGen m', KnownNats b e m) => m' (Format b e m)
+genInf = formatEMS maxBound 0 <$> bit_
+genNan = genQNan
+genQNan = formatEMS maxBound
+  <$> (setMSB <$> Gen.integral @m' @(BitArray m) (Range.linear 1 maxBound))
+  <*> bit_
+genSNan :: forall m' b e m . (H.MonadGen m', KnownNats b e m, KnownNat (m - 1), (m - 1) <= m) => m' (Format b e m)
+genSNan = formatEMS maxBound <$> (upcast @(m - 1) @m <$> Gen.integral (Range.linear 1 maxBound)) <*> bit_
+-- ^ TODO: clearMSB? Then don't need the m - 1 stuff.
+
+-- * Compound
+
+anyNativeWidth :: (H.MonadGen m') => (forall b e m . (KnownNats b e m, KnownNat (m - 1), (m - 1 <= m)) => m' (Format b e m)) -> m' AnyWidth
+anyNativeWidth gen = Gen.choice [ F16 <$> gen, F32 <$> gen, F64 <$> gen ]
+
+data AnyWidth
+  = F16 Soft.Half
+  | F32 Soft.Float
+  | F64 Soft.Double
+  deriving Show
+
+withAnyWidth :: (forall b e m . (HasPrecisionLabel (Format b e m), KnownNat (m - 1)) => Format b e m -> x) -> AnyWidth -> x
+withAnyWidth f = \case
+  F16 a -> f a
+  F32 a -> f a
+  F64 a -> f a
+
+softNativePair
+  :: forall soft m' b e m
+  . ( soft ~ Format b e m, KnownNats b e m
+    , Storable soft
+    , Storable (Native soft)
+    , H.MonadGen m') => m' (soft, Native soft)
+softNativePair = do
+  soft :: soft <- genFloat
+  return (soft, toNative soft)
+
+toNative :: forall soft . (Storable soft, Storable (Native soft)) => soft -> Native soft
+toNative soft = viaStorable @soft @(Native soft) soft
 
 -- | Generate random decimal number as string, both negative and
 -- positive and with or without the fraction part. E.g -9.2, 1, 8, 90842083.0
@@ -478,8 +554,8 @@ randomDecimalString = do
       sign :: Natural -> String
       sign x = (if addSign then "-" else "") <> show x
 
-      maxNat = fromIntegral $ truncate (maxBound :: t)
-      minNat = fromIntegral $ abs $ floatInt (minBound :: t)
+      maxNat = truncate (maxBound :: t)
+      minNat = abs $ truncate (minBound :: t)
 
   int :: String <- Gen.choice
     [ fmap sign  $ Gen.integral $ Range.linear 0 maxNat -- big numbers

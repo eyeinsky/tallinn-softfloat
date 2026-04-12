@@ -1,10 +1,12 @@
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE UndecidableInstances #-}
 module Data.Float where
 
 import LocalPrelude hiding (Float, Double)
 import LocalPrelude qualified as Native
 
 import Foreign.Storable
+import Foreign.Ptr
 import Text.Read
 import GHC.TypeLits
 import Data.Kind
@@ -34,8 +36,8 @@ type Binary128  = Format    2       15      112    -- quad-precision            
 type Binary256  = Format    2       19      236    -- octuple-precision        262143
 
 type family PrecisionLabel a where
-  PrecisionLabel Half = "half"
-  PrecisionLabel Float = "single"
+  PrecisionLabel Half   = "half  "
+  PrecisionLabel Float  = "single"
   PrecisionLabel Double = "double"
   PrecisionLabel (Format b e m) = "b e m"
 
@@ -105,13 +107,6 @@ addBias e = BitArray $ if e < 0
   where
     BitArray biasN = bias @e
 
--- | Get the binary fraction of a float, i.e the 1/2 + 1/4 + 1/8 part
-asBinaryFraction :: BitArray m -> Rational
-asBinaryFraction (BitArray m :: BitArray m) = foldl step 0 $ zip bitlist [(1 :: Integer)..]
-  where
-    step acc (bool, n) = if bool then acc + 1 % 2^n else acc
-    bitlist = reverse $ map (\n -> testBit m n) [0 .. (intVal @m - 1)]
-
 -- | significand = 1 + mantissa, idea from here: https://en.wikipedia.org/wiki/Significand
 significand :: forall b e m . (KnownNat e, KnownNat m) => Format b e m -> Natural
 significand = snd . exponentSignificand
@@ -122,6 +117,23 @@ exponentSignificand Format{exponent, mantissa} = if exponent == 0
   else (toInteger exponent - bias', setBit (bitArrayInt mantissa) (intVal @m)) -- normal
   where
     bias' = toInteger (bias @e)
+
+-- * Rounding
+
+roundFloat :: forall b e m b' e' m' dw.
+  ( KnownNats b e m
+  , KnownNats b' e' m'
+  , dw ~ m' - 1, KnownNat dw
+  ) => Format b e m -> Format b' e' m'
+roundFloat f@(Format s e m)
+  | e == maxBound = if m == 0
+     then (inf :: Format b' e' m') { sign = s }
+     else let BitArray nat = shiftR m (intVal @m - intVal @m') :: BitArray m
+       in snan (BitArray nat :: BitArray dw)
+  | e /= 0 = if bitArrayInt e > bitArrayInt (maxExpBiased @e')
+    then inf
+    else Format s (BitArray $ bitArrayInt e) undefined
+  | otherwise = 0
 
 -- * Instances
 
@@ -145,9 +157,14 @@ minExpBiased = 1
 minExponent :: forall e a . (KnownNat e, Num a) => a
 minExponent = 1 - fromIntegral (bias @e)
 
+minFiniteFloat, maxFiniteFloat :: forall b e m . KnownNats b e m => Format b e m
+minFiniteFloat = Format I maxExpBiased (maxBound :: BitArray m)
+maxFiniteFloat = Format O maxExpBiased (maxBound :: BitArray m)
+
 instance (KnownNats b e m) => Bounded (Format b e m) where
-  minBound = Format I maxExpBiased (maxBound :: BitArray m)
-  maxBound = Format O maxExpBiased (maxBound :: BitArray m)
+  -- TODO: should these be infinites?
+  minBound = minFiniteFloat
+  maxBound = maxFiniteFloat
 
 instance (KnownNats b e m) => FiniteBits (Format b e m) where
   finiteBitSize _ = intVal @e + intVal @m + 1
@@ -186,26 +203,41 @@ instance (KnownNat b, KnownNat e, KnownNat m) => Bits (Format b e m) where
       exponentWidth = intVal @e
       i' = i - mantissaWidth
 
-
-
-
-instance Ord (Format b e m) where
+instance Ord (Format b e m) where -- TODO
   compare (Format s1 e1 m1) (Format s2 e2 m2) = error "instance Ord (Format b e m): not implemented"
-instance KnownNats b e m => Real (Format b e m) where
-instance (KnownNats b e m, HasPrecisionLabel (Format b e m)) => RealFrac (Format b e m) where
-  truncate = fromIntegral . floatInt
-floatInt :: Format b e m -> Integer
-floatInt f = quot n d
-  where
-    r = floatToRational f
-    n = numerator r :: Integer
-    d = denominator r :: Integer
 
-instance (KnownNats b e m, f ~ Format b e m, KnownNat (Width f), HasPrecisionLabel f) => Storable (Format b e m) where
+instance KnownNats b e m => Real (Format b e m) where
+  toRational f@(Format sign exponent mantissa) = case exponent of
+    0 -> addSign sign $ 2^^(unbiasedExponent f) *      asBinaryFraction mantissa  -- subnormal
+    _ -> addSign sign $ 2^^(unbiasedExponent f) * (1 + asBinaryFraction mantissa) -- normal
+    where
+      addSign :: Num a => Bit -> a -> a
+      addSign sign = case sign of
+        O -> id
+        I -> negate
+
+      -- | Get the binary fraction of a float, i.e the 1/2 + 1/4 + 1/8 part
+      asBinaryFraction :: forall m . BitArray m -> Rational
+      asBinaryFraction (BitArray m :: BitArray m) = foldl step 0 $ zip bitlist [(1 :: Integer)..]
+        where
+          step acc (bool, n) = if bool then acc + 1 % 2^n else acc
+          bitlist = reverse $ map (\n -> testBit m n) [0 .. (intVal @m - 1)]
+
+instance (KnownNats b e m, HasPrecisionLabel (Format b e m)) => RealFrac (Format b e m) where
+  truncate f = fromIntegral $ quot (numerator r) (denominator r)
+    where
+      r = toRational f
+
+instance
+  ( KnownNats b e m
+  , f ~ Format b e m
+  , KnownNat (Width f)
+  , w ~ ToWord (Width f), Storable w, Bits w
+  ) => Storable (Format b e m) where
   sizeOf = finiteBitSize
   alignment _  = quot (intVal @(Width f)) 2 -- TODO: correct?
-  peek = error $ "TODO: Storable.peek " ++ precisionLabel @f
-  poke = error $ "TODO: Storable.poke " ++ precisionLabel @f
+  peek ptr = fromBits <$> peek (castPtr ptr :: Ptr w)
+  poke ptr a = poke (castPtr ptr) (toWord a)
 
 instance FiniteBinary Half where
   type Width (Format 2 5 10) = 16
@@ -486,10 +518,10 @@ showDescribeFloat float@(Format sign e m)
   where
     ws = unwords . catMaybes
     s = case sign of I -> "-"; O -> ""
-    viaRational = show @Native.Double $ fromRational $ floatToRational float :: String
+    viaRational = show @Native.Double $ fromRational $ toRational float :: String
 
     signWord = Just $ case sign of O -> "positive"; I -> "negative"
-    (siganling, sg) = if testBit m (intVal @m - 1) then (Nothing, "") else (Just "signaling", "s")
+    (siganling, sg) = if testMSB @m m then (Just "quiet", "") else (Just "signaling", "s")
 
 describeFloat :: Format b e m -> String
 describeFloat f = snd $ showDescribeFloat f
@@ -498,11 +530,11 @@ describeFloat f = snd $ showDescribeFloat f
 
 class ShowFloatBits a where showFloatBits :: a -> String
 instance (KnownNats b e m, KnownSymbol (PrecisionLabel (Format b e m))) => ShowFloatBits (Format b e m) where
-  showFloatBits a = chunkedBitString [1, intVal @e, intVal @m] a ++ " (" ++ symbolVal (Proxy @(PrecisionLabel (Format b e m))) ++ " precision, soft)"
+  showFloatBits a = chunkedBitString [1, intVal @e, intVal @m] a ++ " (" ++ symbolVal (Proxy @(PrecisionLabel (Format b e m))) ++ ", soft  )"
 instance ShowFloatBits Native.Float where
-  showFloatBits a = chunkedBitString [1,8,23] a ++ " (single precision, native)"
+  showFloatBits a = chunkedBitString [1,8,23] a ++ " (single, native)"
 instance ShowFloatBits Native.Double where
-  showFloatBits a = chunkedBitString [1,11,52] a ++ " (double precision, native)"
+  showFloatBits a = chunkedBitString [1,11,52] a ++ " (double, native)"
 
 chunkedBitString :: FiniteBits a => [Int] -> a -> String
 chunkedBitString ixs a = go ixs (bitStringFinite a)
@@ -515,32 +547,13 @@ chunkedBitString ixs a = go ixs (bitStringFinite a)
             _ : _ -> prefix ++ ('_' : go ixs' suffix)
             "" -> prefix
 
-
--- * Unsorted
-
--- | Should this be in Fractional class?
-floatToRational :: forall b e m . Format b e m -> Rational
-floatToRational f@(Format sign exponent mantissa) = case exponent of
-  -- subnormal
-  0 -> addSign sign $ 2^^(unbiasedExponent f) * asBinaryFraction mantissa
-  -- normal
-  _ -> addSign sign $ 2^^(unbiasedExponent f) * rationalMantissa mantissa
-  where
-    addSign :: Num a => Bit -> a -> a
-    addSign sign = case sign of
-      O -> id
-      I -> negate
-
-rationalMantissa :: BitArray w -> Rational
-rationalMantissa m = 1 + asBinaryFraction m
-
 -- * NaN signaling
 
 signalingBound :: forall b m . (KnownNat b, KnownNat m) => BitArray m
 signalingBound = fromInteger $ ((intVal @b :: Integer)^(intVal @m - 1 :: Integer))
 
 snanPayload :: forall b e m . KnownNat (m - 1) => Format b e m -> Maybe (BitArray (m - 1))
-snanPayload (Format _ _ (BitArray m)) = if not $ testBit m ix
+snanPayload (Format _ e (BitArray m)) = if e == maxBound && not (testBit m ix)
   then Just $ BitArray $ clearBit m ix
   else Nothing
   where ix = intVal @m - 1
@@ -559,11 +572,12 @@ nzero :: forall b e m . KnownNats b e m => Format b e m
 nzero = (zero :: Format b e m) {sign = I}
 
 -- | Positive infinity: exponent is all-ones, mantissa is all-zeroes.
-inf :: forall b e m . KnownNats b e m => Format b e m
-inf = Format { sign = O, exponent = maxBound, mantissa = 0 }
+inf, ninf :: forall b e m . KnownNats b e m => Format b e m
+inf = mkInf O
+ninf = mkInf I
 
-ninf :: forall b e m . KnownNats b e m => Format b e m
-ninf = negate (inf :: Format b e m)
+mkInf :: KnownNats b e m => Bit -> Format b e m
+mkInf sign = Format sign maxBound 0
 
 -- | NaN is like infinity, but with a non-zero mantissa.
 nan, qnan :: forall b e m . KnownNats b e m => Format b e m
@@ -571,7 +585,7 @@ nan = (inf @b @e @m) { mantissa = setBit 0 (intVal @m - 1) }
 qnan = nan
 
 -- | Signaling NaN has most significant bit zero, the rest holds argument data.
-snan :: forall b e m m' . (KnownNats b e m, KnownNat m', m' <= m - 1) => BitArray m' -> Format b e m
+snan :: forall b e m dw . (KnownNats b e m, KnownNat dw, dw <= m - 1) => BitArray dw -> Format b e m
 snan (BitArray data_) = (inf @b @e @m) { mantissa = BitArray data_ }
 
 -- * Predicates
@@ -579,11 +593,14 @@ snan (BitArray data_) = (inf @b @e @m) { mantissa = BitArray data_ }
 isNan :: Format b e m -> Bool
 isNan Format{exponent, mantissa} = exponent == maxBound && mantissa /= 0
 
+isQNan :: Format b e m -> Bool
+isQNan Format{exponent, mantissa} = exponent == maxBound && mantissa /= 0 && testMSB mantissa
+
 isInf :: Format b e m -> Bool
 isInf Format{exponent, mantissa} = exponent == maxBound && mantissa == 0
 
 isSubnormal :: Format b e m -> Bool
-isSubnormal Format{exponent} = exponent == 0
+isSubnormal Format{exponent, mantissa} = exponent == 0 && mantissa /= 0
 
 isZero :: Format b e m -> Bool
 isZero = \case

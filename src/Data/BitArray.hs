@@ -95,6 +95,12 @@ showIntBits a = if a < 0
 showPosIntBits :: T -> String
 showPosIntBits a = showIntAtBase 2 intToDigit a ""
 
+testMSB :: forall w . KnownNat w => BitArray w -> Bool
+testMSB a = testBit a (intVal @w - 1)
+
+setMSB :: forall w . KnownNat w => BitArray w -> BitArray w
+setMSB a = setBit a (intVal @w - 1)
+
 -- * Bit list interop
 
 -- | From little-endian bit list to BitArray

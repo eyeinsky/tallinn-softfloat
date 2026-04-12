@@ -65,7 +65,7 @@ bitChar = \case O -> '0'; I -> '1'
 
 -- * Bit list
 
--- | List of bits, infinite, little-endian.
+-- | List of bits, infinite, little-endian (for obvious reasons).
 bitList :: Bits a => a -> [Bit]
 bitList a = map (getBit a) [0..]
 
@@ -121,7 +121,7 @@ add1 bits' = case bits' of
   I : rest -> let (bs, o) = add1 rest in (O : bs, o)
   [] -> ([I], True)
 
--- * Data.Bits.Extra
+-- * @Bits@ class extra functions
 
 -- | Return value with last @n@ bits from argument.
 suffix :: Bits a => Int -> a -> a
