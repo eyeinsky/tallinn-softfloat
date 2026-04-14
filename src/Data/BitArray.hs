@@ -16,6 +16,12 @@ type T = Natural
 data BitArray (w :: Natural) where
   BitArray :: KnownNat w => { bitArrayInt :: T } -> BitArray w
 
+unsafeCoerce :: forall a b . (KnownNat a, KnownNat b) => BitArray a -> BitArray b
+unsafeCoerce (BitArray a) = BitArray a
+
+shiftR_ :: forall a b . (KnownNat a, KnownNat b) => BitArray a -> Int -> BitArray b
+shiftR_ (BitArray a) n = BitArray (shiftR a n)
+
 -- | TODO think about the design of this
 upcast :: forall a b . (KnownNat a, KnownNat b, a <= b) => BitArray a -> BitArray b
 upcast (BitArray a) = BitArray @b a
@@ -43,6 +49,9 @@ instance KnownNat w => Bits (BitArray w) where
   testBit (BitArray i) n = testBit i n
   bit ix = BitArray (bit ix)
   popCount = popCount . bitArrayInt
+
+toBitArray :: forall b a . (Bits a, KnownNat b) => a -> BitArray b
+toBitArray a = foldl' (\b ix -> if testBit a ix then setBit b ix else b) zeroBits [0 .. (intVal @b - 1)]
 
 instance KnownNat w => Num (BitArray w) where
   (+) = mkOp2 (+)

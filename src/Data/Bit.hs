@@ -189,14 +189,14 @@ prettyBinLE rest = boolBitChar (testBit rest 0) : let
   else prettyBinLE rest'
 
 -- TODO make result BitArray as it shows better?
-bitsNatural :: forall a . Bits a => a -> Natural
-bitsNatural a = go a zeroBits 0
+bitsNatural :: forall a . (Bits a, Show a) => a -> Natural
+bitsNatural a = traceShow a $ go a zeroBits 0
   where
     go :: a -> Natural -> Int -> Natural
     go rest acc ix
-      | popCount rest == 0 = acc
-      | testBit rest 0 = go (shiftR rest 1) (setBit acc ix) (ix + 1)
-      | otherwise = go (shiftR rest 1) acc (ix + 1)
+      | popCount rest == 0 = traceShow ("here1", rest, acc, ix) $ acc
+      | testBit rest 0 = traceShow ("here2", rest, acc, ix) $ go (shiftR rest 1) (setBit acc ix) (ix + 1)
+      | otherwise = traceShow ("here3", rest, acc, ix) $ go (shiftR rest 1) acc (ix + 1)
 
 -- ** Rounding
 
@@ -220,10 +220,9 @@ roundEven n a = if
     t1 = t0 + 1
 
 roundEvenOverflow :: forall a . (Bits a, Integral a) => Int -> a -> (a, Bool)
-roundEvenOverflow n a = (a', overflow)
+roundEvenOverflow n a = (a', (highestSetBit a - n) /= highestSetBit a')
   where
     a' = roundEven n a
-    overflow = (highestSetBit a - n) /= highestSetBit a'
 
 highestSetBit :: (Integral b, Integral a) => a -> b
 highestSetBit n = floor $ logBase (2 :: Double) $ fromIntegral n

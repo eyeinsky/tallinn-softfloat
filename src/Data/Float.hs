@@ -14,6 +14,7 @@ import Data.Char hiding (Format)
 import Data.Bits
 import Data.Word
 import Data.Scientific qualified as Scientific
+import System.IO.Unsafe
 
 import Data.BitArray as BitArray hiding (multiply)
 -- import Data.BitArray qualified as BitArray
@@ -118,23 +119,62 @@ exponentSignificand Format{exponent, mantissa} = if exponent == 0
   where
     bias' = toInteger (bias @e)
 
--- * Rounding
+-- * Conversion
 
 roundFloat :: forall b e m b' e' m' dw.
   ( KnownNats b e m
   , KnownNats b' e' m'
   , dw ~ m' - 1, KnownNat dw
   ) => Format b e m -> Format b' e' m'
-roundFloat f@(Format s e m)
-  | e == maxBound = if m == 0
-     then (inf :: Format b' e' m') { sign = s }
-     else let BitArray nat = shiftR m (intVal @m - intVal @m') :: BitArray m
-       in snan (BitArray nat :: BitArray dw)
-  | e /= 0 = if bitArrayInt e > bitArrayInt (maxExpBiased @e')
-    then inf
-    else Format s (BitArray $ bitArrayInt e) undefined
-  | otherwise = 0
+roundFloat f@(Format s e m) = unsafePerformIO $ if
 
+  -- input is infinity or nan
+  | e == maxBound -> do
+      return $ if m == 0
+        then (inf :: Format b' e' m') { sign = s }
+        else let BitArray nat = shiftR m (intVal @m - intVal @m') :: BitArray m
+          in snan (BitArray nat :: BitArray dw)
+
+  -- input is normal float
+  | e < maxBound, e > 0 -> do
+      let exponent = unbiasedExponent f
+      p "e /= 0"
+      print (exponent, maxExponent @e', minExponent @e')
+      if | exponent > maxExponent @e' -> do
+             p "exponent > maxExponent"
+             return inf
+         | exponent < minExponent @e' -> do
+             p "exponent < minExponent"
+             print $ minExponent @e' - exponent
+             let shifts1 = setMSB $ unsafeCoerce $ roundEven mwd m :: BitArray m' -- shift in the implicit leading bit
+             print shifts1
+             let shiftsLeft = fromInteger $ minExponent @e' - exponent - 1
+             return $ Format s 0 (shiftR shifts1 shiftsLeft)
+         | otherwise -> do
+             p "here2"
+             return $ Format s (addBias @e' exponent) (unsafeCoerce $ roundEven mwd m)
+
+  -- input is subnormal
+  | e == 0 -> do
+      return $ case m of
+        -- zero
+        0 -> Format s 0 0
+        -- subnormals
+        BitArray nonZero -> let
+          ed = abs (minExponent @e) - abs (minExponent @e')
+          in Format s 0 $ unsafeCoerce $ roundEven (mwd + ed) m
+
+  | otherwise -> error "THIS SHOULDN'T EVER HAPPEN"
+
+  where
+    mwd = intVal @m - intVal @m'
+
+
+    p s = putStrLn s
+
+
+
+-- unsafeCoerce
 -- * Instances
 
 -- TODO: What does IEEE-754 specify?
