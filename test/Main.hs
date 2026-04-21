@@ -22,6 +22,9 @@ import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
 import Test.Tasty qualified as Tasty
 import Test.Tasty.Hedgehog qualified as Tasty
+import Hedgehog.Internal.Source qualified as H (withFrozenCallStack)
+import Hedgehog.Internal.Property qualified as H (failDiff, eval)
+
 
 import Data.BitArray
 import Data.Float hiding (Float, Double)
@@ -440,32 +443,49 @@ unitTest_roundBinary = unitTest $ do
   test 0b_1000_1010 === ( 0b_1001, False) -- up
   test 0b_1111_1100 === (0b_10000, True ) -- up, overflow
 
+type F = Format 2
 type Tiny = Format 2 3 3
+
+-- | Test, but only log footnote when arguments compare non-equal.
+testFootnote :: (Show a, Show b, H.MonadTest m) => (a -> b -> Bool) -> a -> b -> String -> m ()
+testFootnote bop a b note =
+  if a `bop` b
+  then H.success
+  else do
+    H.footnote note
+    H.failDiff a b
 
 unitTest_roundFloat :: H.Property
 unitTest_roundFloat = unitTest $ do
   let b (n :: Natural) = fromBits n :: Format 2 3 3
-      test :: Word8 -> Natural -> H.PropertyT IO ()
-      test input_ expected_ = let
+      test :: String -> Word8 -> Natural -> H.PropertyT IO ()
+      test label input_ expected_ = let
         input = fromBits input_ :: Format 2 3 3
         rounded = roundFloat input :: Format 2 2 2
         expected = fromBits expected_ :: Format 2 2 2
         in do
-        H.footnote $ unlines
-          [ "input:    " <> showFloatBits_ input
+        testFootnote (==) (toBitArray @5 rounded) (toBitArray expected) $ unlines
+          [ "PART:     " <> label
+          , "input:    " <> showFloatBits_ input
           , "rounded:  " <> showFloatBits_ rounded
           , "expected: " <> showFloatBits_ expected
           ]
-        toBitArray @5 rounded === toBitArray expected
 
-  test 0b_0_011_000 -- normal -> normal
+  test "f33/f22, normal -> normal"
+       0b_0_011_000 --
        0b_0__01_00
 
-  test 0b_0_010_000 -- normal -> subnormal, 0.5 -> 0.5
+  test "f33/f22, normal 0.5 -> subnormal 0.5"
+       0b_0_010_000 --
        0b_0__00_10
 
-  test 0b_0_000_100 -- subnormal -> subnormal
-       0b_0__00_10
+  test "f33/f22, subnormal -> -inf"
+       0b_0_000_100
+       0b_0__00_00
+
+  test "ongoing"
+       0b_0_000_100
+       0b_0__00_00
 
   return ()
 
@@ -476,7 +496,7 @@ bf (n :: Natural) = fromBits n -- :: Format 2 3 3
 
 floatInfo :: forall float b e m . (float ~ Format b e m, KnownNats b e m) => IO ()
 floatInfo = do
-  putStrLn $ "min/max exponent " <> show (minExponent @e, maxExponent @e)
+  putStrLn $ "min/max exponent " <> show (minExp @e, maxExp @e)
   putStrLn $ "bias " <> let bias'@(BitArray n) = bias @e in show (bias', n)
   putStrLn $ "min/max float " <> show (minBound @float, maxBound @float)
   putStrLn $ "around zero " <> show (setBit zeroBits 0 :: float)

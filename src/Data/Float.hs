@@ -93,12 +93,12 @@ data WidthResult a
 -- | Add bias to exponent @e@, indicate both under- or overflow
 addBias_ :: forall e . KnownNat e => Integer -> WidthResult (BitArray e)
 addBias_ e
-  | eb <= 0           = Underflow $ minExponent @e - e -- absolute distance between given and the minimal exponent
-  | eb > fromIntegral (maxExpBiased @e) = Overflow $ e - maxExponent'
+  | eb <= 0           = Underflow $ minExp @e - e -- absolute distance between given and the minimal exponent
+  | eb > fromIntegral (maxExpBiased @e) = Overflow $ e - maxExp'
   | otherwise = Result $ fromIntegral $ abs eb
   where
     eb = e + fromIntegral (bias @e) :: Integer
-    maxExponent' = maxExponent @e :: Integer
+    maxExp' = maxExp @e :: Integer
 
 -- | Add bias to exponent @e@. Nothing means underflow.
 addBias :: forall e . KnownNat e => Integer -> BitArray e
@@ -107,6 +107,22 @@ addBias e = BitArray $ if e < 0
   else biasN + fromIntegral e
   where
     BitArray biasN = bias @e
+
+-- * Exponent
+
+maxExpBiased :: forall w . KnownNat w => BitArray w
+maxExpBiased = (maxBound :: BitArray w) - 1
+
+maxExp :: forall e a . (KnownNat e, Num a) => a
+maxExp = fromIntegral (maxExpBiased :: BitArray e) - fromIntegral (bias @e)
+
+minExpBiased :: forall e . KnownNat e => BitArray e
+minExpBiased = 1
+
+minExp :: forall e a . (KnownNat e, Num a) => a
+minExp = 1 - fromIntegral (bias @e)
+
+-- * Significand
 
 -- | significand = 1 + mantissa, idea from here: https://en.wikipedia.org/wiki/Significand
 significand :: forall b e m . (KnownNat e, KnownNat m) => Format b e m -> Natural
@@ -139,16 +155,16 @@ roundFloat f@(Format s e m) = unsafePerformIO $ if
   | e < maxBound, e > 0 -> do
       let exponent = unbiasedExponent f
       p "e /= 0"
-      print (exponent, maxExponent @e', minExponent @e')
-      if | exponent > maxExponent @e' -> do
-             p "exponent > maxExponent"
+      print (exponent, maxExp @e', minExp @e')
+      if | exponent > maxExp @e' -> do
+             p "exponent > maxExp"
              return inf
-         | exponent < minExponent @e' -> do
-             p "exponent < minExponent"
-             print $ minExponent @e' - exponent
+         | exponent < minExp @e' -> do
+             p "exponent < minExp"
+             print $ minExp @e' - exponent
              let shifts1 = setMSB $ unsafeCoerce $ roundEven mwd m :: BitArray m' -- shift in the implicit leading bit
              print shifts1
-             let shiftsLeft = fromInteger $ minExponent @e' - exponent - 1
+             let shiftsLeft = fromInteger $ minExp @e' - exponent - 1
              return $ Format s 0 (shiftR shifts1 shiftsLeft)
          | otherwise -> do
              p "here2"
@@ -161,50 +177,42 @@ roundFloat f@(Format s e m) = unsafePerformIO $ if
         0 -> Format s 0 0
         -- subnormals
         BitArray nonZero -> let
-          ed = abs (minExponent @e) - abs (minExponent @e')
+          ed = abs (minExp @e) - abs (minExp @e')
           in Format s 0 $ unsafeCoerce $ roundEven (mwd + ed) m
 
   | otherwise -> error "THIS SHOULDN'T EVER HAPPEN"
 
   where
     mwd = intVal @m - intVal @m'
-
-
     p s = putStrLn s
 
-
-
--- unsafeCoerce
 -- * Instances
 
--- TODO: What does IEEE-754 specify?
-instance Eq (Format b e m) where
+instance Eq (Format b e m) where -- TODO: IEEE-754?
   Format s e m == Format s' e' m' = s == s' && e == e' && m == m'
 
 -- | Minimal an maximal non-infinity values. Exponent for both is
 -- one-less than all-ones exponent, as otherwise it will be infinity
 -- or nan (depending on mantissa value).
-
-maxExpBiased :: forall w . KnownNat w => BitArray w
-maxExpBiased = (maxBound :: BitArray w) - 1
-
-maxExponent :: forall e a . (KnownNat e, Num a) => a
-maxExponent = fromIntegral (maxExpBiased :: BitArray e) - fromIntegral (bias @e)
-
-minExpBiased :: forall e . KnownNat e => BitArray e
-minExpBiased = 1
-
-minExponent :: forall e a . (KnownNat e, Num a) => a
-minExponent = 1 - fromIntegral (bias @e)
-
 minFiniteFloat, maxFiniteFloat :: forall b e m . KnownNats b e m => Format b e m
 minFiniteFloat = Format I maxExpBiased (maxBound :: BitArray m)
 maxFiniteFloat = Format O maxExpBiased (maxBound :: BitArray m)
 
-instance (KnownNats b e m) => Bounded (Format b e m) where
+instance (KnownNats b e m) => Bounded (Format b e m) where -- TODO: IEEE-754?
   -- TODO: should these be infinites?
   minBound = minFiniteFloat
   maxBound = maxFiniteFloat
+
+allValues :: forall b e m . KnownNats b e m => [Format b e m]
+allValues = (ninf : []) ++ negatives ++ [nzero, zero] ++ positives ++ [inf]
+  where
+    -- finite
+    negatives = []
+    positives = []
+
+-- instance Eunm (Format b e m) where TODO
+  -- toEnum i
+  -- fromEnum f =
 
 instance (KnownNats b e m) => FiniteBits (Format b e m) where
   finiteBitSize _ = intVal @e + intVal @m + 1
@@ -472,7 +480,7 @@ multiply f1@(Format sign1 _ _m1) f2@(Format sign2 _ _m2)
     sigMult_overflow = s0hsb == (intVal @m * 2 + 1)
     sigMult_normal = s0hsb == (intVal @m * 2) && not sigMult_overflow
     sigMult_subnormal = s0hsb < (intVal @m * 2)
-    exp_resultInBounds = e0 >= minExponent @e && e0 <= maxExponent @e
+    exp_resultInBounds = e0 >= minExp @e && e0 <= maxExp @e
 
     float :: Format b e m
     (float, debug')
@@ -520,7 +528,7 @@ multiply f1@(Format sign1 _ _m1) f2@(Format sign2 _ _m2)
 
     debug =
       [ "s0: " <> prettyBinFrac (intVal @m * 2) s0 -- <> " subnormalS0: " <> show subnormalS0
-      , "e0: " <> unwords [show e0, "(" <> show (unbiasedExponent f1), "+", show (unbiasedExponent f2) <> ",", show (minExponent @e) <> "/" <> show (maxExponent @e), "min/max)"]
+      , "e0: " <> unwords [show e0, "(" <> show (unbiasedExponent f1), "+", show (unbiasedExponent f2) <> ",", show (minExp @e) <> "/" <> show (maxExp @e), "min/max)"]
 
       , l "\nsigMult_overflow" sigMult_overflow
       , l "sigMult_normal" sigMult_normal
@@ -528,7 +536,7 @@ multiply f1@(Format sign1 _ _m1) f2@(Format sign2 _ _m2)
 
       , l "\nexp_resultInBounds" (exp_resultInBounds, er, case er of Result{} -> True; _ -> False)
 
-      , l "\ne0, minExponent" (e0, minExponent @e)
+      , l "\ne0, minExp" (e0, minExp @e)
 
       ] <> debug'
 
