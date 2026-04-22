@@ -13,8 +13,7 @@ import Control.Concurrent
 import GHC.TypeLits
 import Foreign.Storable
 import Foreign.Marshal
-import GHC.Exts (double2Float#, Double(D#), Float(F#))
-import System.IO.Unsafe
+import GHC.Float (double2Float)
 
 import Hedgehog ((===))
 import Hedgehog qualified as H
@@ -22,8 +21,7 @@ import Hedgehog.Gen qualified as Gen
 import Hedgehog.Range qualified as Range
 import Test.Tasty qualified as Tasty
 import Test.Tasty.Hedgehog qualified as Tasty
-import Hedgehog.Internal.Source qualified as H (withFrozenCallStack)
-import Hedgehog.Internal.Property qualified as H (failDiff, eval)
+import Hedgehog.Internal.Property qualified as H (failDiff)
 
 
 import Data.BitArray
@@ -81,8 +79,9 @@ main = Tasty.defaultMain $ Tasty.testGroup "Softfloat"
     , Tasty.testProperty "no rounding" prop_shorterValuesNeedNoRounding
     -- binary
     , Tasty.testProperty "Binary rounding" unitTest_roundBinary
+    , Tasty.testProperty "usit test roundFloat" unitTest_roundFloat
     -- soft vs native
-    , Tasty.testProperty "soft vs native" prop_identicalSoftAndNativeRounding
+    , Tasty.testProperty "soft vs native" prop_roundFloat
     ]
   ]
 
@@ -263,28 +262,10 @@ delayed a = liftIO $ do
 
 hot :: IO ()
 hot = do
-  -- unsafePerformIO $
-  -- putStrLn $ showFloatBits_ (roundFloat (fromBits @Natural 0b_010_000 :: Format 2 3 3) :: Format 2 2 2)
   return ()
-  runTest "unitTest_roundFloat" unitTest_roundFloat
-  -- let b (n :: Natural) = fromBits n :: Format 2 3 3
-
-  --     round :: Format 2 3 3 -> (Format 2 3 3, Format 2 2 2)
-  --     round f = (f, unsafePerformIO $ roundFloat f)
-
-  --     showFloatBits' f = showFloatBits f <> ", " <> describeFloat f
-
-  --     test :: Format 2 3 3 -> IO ()
-  --     test f = do
-  --       let (a, b) = round f
-  --       putStrLn $ "\n\n" <> unlines [showFloatBits' a, showFloatBits' b]
-
-  -- liftIO $ test $ b 0b_0_011_000
-
--- unitTest_addBias :: H.Property
--- unitTest_addBias = unitTest $ do
---   (sd, nd) <- H.forAll (softNativePair @Soft.Double)
---   return ()
+  -- runTest "unitTest_roundFloat" unitTest_roundFloat
+  runTest "prop_roundFloat" $ H.withTests 10000 $ prop_roundFloat
+  -- H.recheckAt (H.Seed 4199924757645690049 18376928715434158743) "80:eB3dCbA"  prop_roundFloat
 
 unitTest_BitsInstance :: H.Property
 unitTest_BitsInstance = unitTest $ do
@@ -457,81 +438,56 @@ testFootnote bop a b note =
 
 unitTest_roundFloat :: H.Property
 unitTest_roundFloat = unitTest $ do
-  let b (n :: Natural) = fromBits n :: Format 2 3 3
-      test :: String -> Word8 -> Natural -> H.PropertyT IO ()
-      test label input_ expected_ = let
-        input = fromBits input_ :: Format 2 3 3
-        rounded = roundFloat input :: Format 2 2 2
-        expected = fromBits expected_ :: Format 2 2 2
-        in do
-        testFootnote (==) (toBitArray @5 rounded) (toBitArray expected) $ unlines
-          [ "PART:     " <> label
-          , "input:    " <> showFloatBits_ input
-          , "rounded:  " <> showFloatBits_ rounded
-          , "expected: " <> showFloatBits_ expected
-          ]
+  let test :: String -> Natural -> Natural -> H.PropertyT IO ()
+      test label input_ expected_ = do
+        testRoundFloat @(F 3 3) @(F 2 2) label (fromBits input_) (toBitArray (fromBits expected_ :: Format 2 2 2) :: BitArray 5)
 
-  test "f33/f22, normal -> normal"
-       0b_0_011_000 --
-       0b_0__01_00
+  test "normal -> inf, overflow"
+       0b_100_111 -- 3.75
+       0b__11__00 -- expected infinity, as 3.5 is max finite float for F 2 2
+  -- FUTUREWORK: add case between here where rounding down produces a normal float.
+  test "normal -> normal, max finite target"
+       0b_100_110 -- 3.5
+       0b__10__11 -- 3.5
+  test "normal -> normal"
+       0b_0_011_000 -- 1.0
+       0b_0__01_00  -- 1.0
+  test "normal -> subnormal"
+       0b_0_010_000 -- 0.5
+       0b_0__00_010 -- 0.5
+  test "subnormal -> 0, underflow"
+       0b_0_000_100 -- 0.125
+       0b_0__00__00 -- 0, as 0.25 is smallest finite F 2 2 float
 
-  test "f33/f22, normal 0.5 -> subnormal 0.5"
-       0b_0_010_000 --
-       0b_0__00_10
+  testRoundFloat @_  @Soft.Float @_
+       "normal -> subnormal, minimal subnormal"
+       (bf 0b0_01101101001_0000000000000000000000000000000000000000000000000001 :: Soft.Double)
+          (0b0____00000000______________________________00000000000000000000001 :: BitArray 32)
 
-  test "f33/f22, subnormal -> -inf"
-       0b_0_000_100
-       0b_0__00_00
-
-  test "ongoing"
-       0b_0_000_100
-       0b_0__00_00
-
-  return ()
-
-showFloatBits_ f = intercalate ", " [showFloatBits f, describeFloat f, show f]
-
-bf :: forall float b e m . (float ~ Format b e m, KnownNats b e m) => Natural -> float
-bf (n :: Natural) = fromBits n -- :: Format 2 3 3
-
-floatInfo :: forall float b e m . (float ~ Format b e m, KnownNats b e m) => IO ()
-floatInfo = do
-  putStrLn $ "min/max exponent " <> show (minExp @e, maxExp @e)
-  putStrLn $ "bias " <> let bias'@(BitArray n) = bias @e in show (bias', n)
-  putStrLn $ "min/max float " <> show (minBound @float, maxBound @float)
-  putStrLn $ "around zero " <> show (setBit zeroBits 0 :: float)
-
-uinitTest_identicalSoftAndNativeRounding :: H.Property
-uinitTest_identicalSoftAndNativeRounding = unitTest $ do
-  testDoubleFloatRounding (Format O maxBound (setMSB 0 + 12345678919) :: Soft.Double)
-
-testDoubleFloatRounding sd = do
-  () === ()
-  -- let
-  --     nd = toNative sd
-  --     nf = double2Float nd
-  --     sf = undefined -- roundFloat sd :: Soft.Float
-
-  -- H.footnote $ unlines
-  --   [ "sd " <> showFloatBits sd <> " " <> showCat sd
-  --   , "nd " <> showFloatBits nd <> " " <> show nd
-  --   , "nf " <> showFloatBits nf <> " " <> show nf
-  --   , "sf " <> showFloatBits sf <> " " <> showCat sf
-  --   ]
-
-  -- undefined -- todo
---  toWord nf === toWord sf -- !!! Need to compare the underlying binary form as identical IEEE-754 NaNs don't compare equal to each other.
-
-showCat :: Format b e m -> String
-showCat f = show f <> ", " <> snd (showDescribeFloat f)
-
-prop_identicalSoftAndNativeRounding :: H.Property
-prop_identicalSoftAndNativeRounding = H.property $ do
+prop_roundFloat :: H.Property
+prop_roundFloat = H.property $ do
   sd :: Soft.Double <- H.forAll genFloat
-  testDoubleFloatRounding sd
+  testRoundFloat @Soft.Double @Soft.Float @32 "" sd (toBitArray @32 (double2Float (toNative sd) :: Native.Float))
+  let nsd = negate sd
+  testRoundFloat @Soft.Double @Soft.Float @32 "" nsd (toBitArray @32 (double2Float (toNative nsd) :: Native.Float))
 
-double2Float :: Double -> Float
-double2Float (D# d) = F# (double2Float# d)
+testRoundFloat :: forall src dest w {b} {e} {m} {b'} {e'} {m'} {dw}.
+  ( src  ~ Format b  e  m , KnownNats b e m   , HasPrecisionLabel src
+  , dest ~ Format b' e' m', KnownNats b' e' m', HasPrecisionLabel dest
+  , dw ~ m' - 1, KnownNat dw
+  , KnownNat w
+  ) => String -> src -> BitArray w -> H.PropertyT IO ()
+testRoundFloat label src expectedBits = let
+  rounded = roundFloat src :: dest
+  in do
+  testFootnote (==) (toBitArray rounded) expectedBits $ unlines $
+    [ "\nTEST:     " <> label
+    , "src:      " <> showFloatBits src
+    , "rounded:  " <> showFloatBits rounded
+    , "expected: " <> chunkedBitString [1, intVal @e', intVal @m'] expectedBits
+    ] <>
+    ("\nINPUT TYPE" : floatTypeInfo @src) <>
+    ("\nOUTPUT TYPE" : floatTypeInfo @dest)
 
 -- | Comprehensive test for `roundBits`. TODO: why not listed in the tests?
 prop_longerValuesRoundCorrectly :: H.Property
@@ -574,6 +530,7 @@ prop_longerValuesRoundCorrectly = H.property $ do
 
 -- ** Basic
 
+-- | Generat any float, including all special values. TODO: is there a way to generate just one of each special value?
 genFloat :: forall b e m m' . (KnownNats b e m, H.MonadGen m') => m' (Format b e m)
 genFloat = Gen.choice $ genNormal : genSubnormal : map pure [zero, negate zero, inf, negate inf, nan]
 
@@ -667,3 +624,6 @@ randomDecimalString = do
 
 disable :: H.Property -> H.Property
 disable _prop = H.property H.success
+
+bf :: forall float b e m . (float ~ Format b e m, KnownNats b e m) => Natural -> float
+bf (n :: Natural) = fromBits n -- :: Format 2 3 3

@@ -19,6 +19,9 @@ import Text.Read
 u :: a
 u = undefined
 
+pl :: Show a => String -> a -> IO ()
+pl label a = putStrLn $ label <> ": " <> show a
+
 -- | Proxy-less/AllowAmbiguousTypes way to get value level integer from KnownNat
 integerVal :: forall e . KnownNat e => Integer
 integerVal = natVal @e Proxy

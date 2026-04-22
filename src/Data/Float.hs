@@ -124,6 +124,9 @@ minExp = 1 - fromIntegral (bias @e)
 
 -- * Significand
 
+maxSig :: forall m . KnownNat m => BitArray m
+maxSig = 2^(intVal @m) - 1
+
 -- | significand = 1 + mantissa, idea from here: https://en.wikipedia.org/wiki/Significand
 significand :: forall b e m . (KnownNat e, KnownNat m) => Format b e m -> Natural
 significand = snd . exponentSignificand
@@ -137,54 +140,89 @@ exponentSignificand Format{exponent, mantissa} = if exponent == 0
 
 -- * Conversion
 
-roundFloat :: forall b e m b' e' m' dw.
+roundFloat :: forall src dest {b} {e} {m} {b'} {e'} {m'} {dw} .
   ( KnownNats b e m
   , KnownNats b' e' m'
+  , src ~ Format b e m
+  , dest ~ Format b' e' m'
   , dw ~ m' - 1, KnownNat dw
+  , HasPrecisionLabel src
   ) => Format b e m -> Format b' e' m'
-roundFloat f@(Format s e m) = unsafePerformIO $ if
+roundFloat f@(Format s e m) = unsafePerformIO $ wrap $ if
+  -- upcast
+  | intVal @e' > intVal @e -> do
+      p "UPCAST"
+      undefined
 
   -- input is infinity or nan
   | e == maxBound -> do
       return $ if m == 0
-        then (inf :: Format b' e' m') { sign = s }
+        then inf_
         else let BitArray nat = shiftR m (intVal @m - intVal @m') :: BitArray m
-          in snan (BitArray nat :: BitArray dw)
+          in snan_ (BitArray nat :: BitArray dw)
 
   -- input is normal float
-  | e < maxBound, e > 0 -> do
-      let exponent = unbiasedExponent f
-      p "e /= 0"
-      print (exponent, maxExp @e', minExp @e')
+  | 0 < e, e < maxBound -> do
+      p $ unlines
+        $ ("INPUT TYPE" : map ("  " <>) (floatTypeInfo @src))
+        ++ ("OUTPUT TYPE" : map ("  " <>) (floatTypeInfo @dest))
+        ++ ["INPUT VALUE", showFloatBits f]
+
       if | exponent > maxExp @e' -> do
-             p "exponent > maxExp"
-             return inf
+             p "current exponent > max target exponent"
+             return inf_
          | exponent < minExp @e' -> do
-             p "exponent < minExp"
-             print $ minExp @e' - exponent
-             let shifts1 = setMSB $ unsafeCoerce $ roundEven mwd m :: BitArray m' -- shift in the implicit leading bit
-             print shifts1
-             let shiftsLeft = fromInteger $ minExp @e' - exponent - 1
-             return $ Format s 0 (shiftR shifts1 shiftsLeft)
-         | otherwise -> do
+             p "current exponent < min target exponent => subnormal"
+             let dist = minExp @e' -  exponent
+             pl "dist" dist
+             let exp = 0 -- i.e, this will be a subnormal
+                 significand' = BitArray $ roundEven (mwd + fromIntegral dist) significand :: BitArray m'
+             pl "dest significand" significand'
+             return $ format_ 0 significand'
+         | otherwise -> do -- exponent [min, max]
              p "here2"
-             return $ Format s (addBias @e' exponent) (unsafeCoerce $ roundEven mwd m)
+             pl "mwd, m, m'" (mwd, intVal @m, intVal @m')
+             pl "m" m
+             let (m', overflow) = roundEvenOverflow mwd significand -- this also says whether we round up to infinity or down to normal range
+             pl "m'" (m', overflow)
+             pl "biased target exp" $ addBias @e' exponent
+             if overflow && (exponent + 1) > maxExp @e'
+               then return $ (inf :: dest) { sign = s }
+               else return $ format_ (addBias @e' exponent) (BitArray m')
 
   -- input is subnormal
-  | e == 0 -> do
+  | e == 0, m /= 0 -> do
       return $ case m of
         -- zero
-        0 -> Format s 0 0
+        0 -> format_ 0 0
         -- subnormals
         BitArray nonZero -> let
           ed = abs (minExp @e) - abs (minExp @e')
-          in Format s 0 $ unsafeCoerce $ roundEven (mwd + ed) m
+          in format_ 0 $ unsafeCoerce $ roundEven (mwd + ed) m
 
-  | otherwise -> error "THIS SHOULDN'T EVER HAPPEN"
+  -- zero
+  | e == 0, m == 0 -> return $ format_ 0 0
+
+  | otherwise -> do
+      pl "showFloatBits f" $ showFloatBits f
+      pl "exponentSignificand f" $ exponentSignificand f
+      error "THIS SHOULDN'T EVER HAPPEN"
 
   where
+    (exponent, significand) = exponentSignificand f
     mwd = intVal @m - intVal @m'
-    p s = putStrLn s
+
+    -- Helpers to return value with same sign as input
+    format_ e m = Format s e m              :: dest
+    inf_ = (inf :: dest) { sign = s }       :: dest
+    snan_ v = (snan v :: dest) { sign = s } :: dest
+
+    -- wrap io = putStrLn "<<<<<" *> io <* putStrLn ">>>>>"
+    -- p s = putStrLn s
+    -- pl a  = LocalPrelude.pl a
+    wrap io = io
+    p s = return ()
+    pl a b = return ()
 
 -- * Instances
 
@@ -204,14 +242,32 @@ instance (KnownNats b e m) => Bounded (Format b e m) where -- TODO: IEEE-754?
   maxBound = maxFiniteFloat
 
 allValues :: forall b e m . KnownNats b e m => [Format b e m]
-allValues = (ninf : []) ++ negatives ++ [nzero, zero] ++ positives ++ [inf]
+allValues = [ninf] ++ allFiniteNegatives ++ allFinitePositives ++ [inf]
   where
-    -- finite
-    negatives = []
-    positives = []
 
--- instance Eunm (Format b e m) where TODO
-  -- toEnum i
+allFinitePositives :: forall b e m . KnownNats b e m => [Format b e m]
+allFinitePositives = Format O <$> [0 .. maxExpBiased] <*> [0 .. maxSig]
+
+allFiniteNegatives :: forall b e m . KnownNats b e m => [Format b e m]
+allFiniteNegatives = Format I <$> [maxExpBiased, maxExpBiased - 1 .. 0] <*> [maxSig, maxSig - 1 .. 0]
+
+ps :: forall b e m . KnownNats b e m => [Format b e m]
+ps = allFinitePositives
+
+ns :: forall b e m . KnownNats b e m => [Format b e m]
+ns = allFiniteNegatives
+
+instance KnownNats b e m => Enum (Format b e m) where -- TODO
+  toEnum i = if i >= 0
+    then if
+      | i == 0 -> ninf
+      | i < negCount -> undefined
+      | i > negCount -> undefined
+      | undefined -> inf
+    else error "Enum (Format b e m): toEnum negative Int"
+    where
+      negCount = fromIntegral (maxExpBiased @e) * fromIntegral (maxSig @m)
+
   -- fromEnum f =
 
 instance (KnownNats b e m) => FiniteBits (Format b e m) where
@@ -476,7 +532,7 @@ multiply f1@(Format sign1 _ _m1) f2@(Format sign2 _ _m2)
 
     er = addBias_ @e e0 :: WidthResult (BitArray e)
 
-    s0hsb = highestSetBit s0
+    s0hsb = fromJust $ highestSetBit s0 -- TODO: resolve fromJust. Added because highestSetBit result was put into a Maybe
     sigMult_overflow = s0hsb == (intVal @m * 2 + 1)
     sigMult_normal = s0hsb == (intVal @m * 2) && not sigMult_overflow
     sigMult_subnormal = s0hsb < (intVal @m * 2)
@@ -578,11 +634,23 @@ describeFloat f = snd $ showDescribeFloat f
 
 class ShowFloatBits a where showFloatBits :: a -> String
 instance (KnownNats b e m, KnownSymbol (PrecisionLabel (Format b e m))) => ShowFloatBits (Format b e m) where
-  showFloatBits a = chunkedBitString [1, intVal @e, intVal @m] a ++ " (" ++ symbolVal (Proxy @(PrecisionLabel (Format b e m))) ++ ", soft  )"
+  showFloatBits a = unwords
+    [ chunkedBitString [1, intVal @e, intVal @m] a
+    , show a
+    , let (e, m) = exponentSignificand a in "(exp " <> show e <> ", frac " <> show m <> ")"
+    , "(" ++ symbolVal (Proxy @(PrecisionLabel (Format b e m))) ++ ", soft  )" ]
 instance ShowFloatBits Native.Float where
-  showFloatBits a = chunkedBitString [1,8,23] a ++ " (single, native)"
+  showFloatBits a = unwords
+    [ chunkedBitString [1,8,23] a
+    , show a
+    -- , show $ exponentSignificand a
+    , " (single, native)" ]
 instance ShowFloatBits Native.Double where
-  showFloatBits a = chunkedBitString [1,11,52] a ++ " (double, native)"
+  showFloatBits a = unwords
+    [ chunkedBitString [1,11,52] a
+    , show a
+    -- , show $ exponentSignificand a
+    , " (double, native)" ]
 
 chunkedBitString :: FiniteBits a => [Int] -> a -> String
 chunkedBitString ixs a = go ixs (bitStringFinite a)
@@ -654,3 +722,16 @@ isZero :: Format b e m -> Bool
 isZero = \case
   Format _ 0 0 -> True
   _ -> False
+
+-- * Misc
+
+printFloatTypeInfo :: forall float b e m . (float ~ Format b e m, KnownNats b e m) => IO ()
+printFloatTypeInfo = mapM_ putStrLn (floatTypeInfo @float)
+
+floatTypeInfo :: forall float b e m . (float ~ Format b e m, KnownNats b e m) => [String]
+floatTypeInfo =
+  [ "min/max exponent " <> show (minExp @e :: Integer, maxExp @e :: Integer)
+  , "bias " <> let bias'@(BitArray n) = bias @e in show (bias', n)
+  , "min/max float " <> show (minBound @float, maxBound @float)
+  , "around zero " <> show (setBit zeroBits 0 :: float)
+  ]

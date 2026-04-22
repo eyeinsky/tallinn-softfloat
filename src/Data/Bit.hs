@@ -220,12 +220,15 @@ roundEven n a = if
     t1 = t0 + 1
 
 roundEvenOverflow :: forall a . (Bits a, Integral a) => Int -> a -> (a, Bool)
-roundEvenOverflow n a = (a', (highestSetBit a - n) /= highestSetBit a')
+roundEvenOverflow n a = (a', fmap (\x -> x - n) (highestSetBit a) /= highestSetBit a')
   where
     a' = roundEven n a
 
-highestSetBit :: (Integral b, Integral a) => a -> b
-highestSetBit n = floor $ logBase (2 :: Double) $ fromIntegral n
+-- | Return index of highest set bit. E.g, for 4 (0b100 in binary), it's 2.
+highestSetBit :: (Integral b, Integral a) => a -> Maybe b
+highestSetBit = \case
+  0 -> Nothing
+  n -> Just $ floor $ logBase (2 :: Double) $ fromIntegral n
 
 -- ** Instances for native floats
 
