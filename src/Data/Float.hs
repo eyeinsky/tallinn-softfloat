@@ -268,7 +268,7 @@ instance KnownNats b e m => Enum (Format b e m) where -- TODO
     where
       negCount = fromIntegral (maxExpBiased @e) * fromIntegral (maxSig @m)
 
-  -- fromEnum f =
+
 
 instance (KnownNats b e m) => FiniteBits (Format b e m) where
   finiteBitSize _ = intVal @e + intVal @m + 1
@@ -653,7 +653,10 @@ instance ShowFloatBits Native.Double where
     , " (double, native)" ]
 
 chunkedBitString :: FiniteBits a => [Int] -> a -> String
-chunkedBitString ixs a = go ixs (bitStringFinite a)
+chunkedBitString ixs a = "0b" <> chunkedBitString' ixs a
+
+chunkedBitString' :: FiniteBits a => [Int] -> a -> String
+chunkedBitString' ixs a = go ixs (bitStringFinite a)
   where
     go ixs xs
       | [] <- ixs = xs

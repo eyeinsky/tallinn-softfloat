@@ -262,9 +262,10 @@ delayed a = liftIO $ do
 
 hot :: IO ()
 hot = do
-  return ()
-  -- runTest "unitTest_roundFloat" unitTest_roundFloat
-  runTest "prop_roundFloat" $ H.withTests 10000 $ prop_roundFloat
+  main
+  -- return ()
+  -- -- runTest "unitTest_roundFloat" unitTest_roundFloat
+  -- runTest "prop_roundFloat" $ H.withTests 10000 $ prop_roundFloat
   -- H.recheckAt (H.Seed 4199924757645690049 18376928715434158743) "80:eB3dCbA"  prop_roundFloat
 
 unitTest_BitsInstance :: H.Property
