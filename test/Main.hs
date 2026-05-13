@@ -464,24 +464,32 @@ unitTest_roundFloat = unitTest $ do
        (bf 0b0_01101101001_0000000000000000000000000000000000000000000000000001 :: Soft.Double)
           (0b0____00000000______________________________00000000000000000000001 :: BitArray 32)
 
+-- | Generate random doubles, round them down to floats, compare
+-- result gotten via doing it natively.
 prop_roundFloat :: H.Property
 prop_roundFloat = H.property $ do
   sd :: Soft.Double <- H.forAll genFloat
-  testRoundFloat @Soft.Double @Soft.Float @32 "" sd (toBitArray @32 (double2Float (toNative sd) :: Native.Float))
-  let nsd = negate sd
-  testRoundFloat @Soft.Double @Soft.Float @32 "" nsd (toBitArray @32 (double2Float (toNative nsd) :: Native.Float))
+  let expected = toBitArray @32 (double2Float (toNative sd) :: Native.Float)
+  testRoundFloat @Soft.Double @Soft.Float @32 "" sd expected
 
+  -- Same as above for negative:
+  let nsd = negate sd
+      expected = toBitArray @32 (double2Float (toNative nsd) :: Native.Float)
+  testRoundFloat @Soft.Double @Soft.Float @32 "" nsd expected
+
+-- | From input argument @src@ round it down to @dest@ type. The
+-- result should have the @expectedBits@.
 testRoundFloat :: forall src dest w {b} {e} {m} {b'} {e'} {m'} {dw}.
   ( src  ~ Format b  e  m , KnownNats b e m   , HasPrecisionLabel src
   , dest ~ Format b' e' m', KnownNats b' e' m', HasPrecisionLabel dest
   , dw ~ m' - 1, KnownNat dw
   , KnownNat w
   ) => String -> src -> BitArray w -> H.PropertyT IO ()
-testRoundFloat label src expectedBits = let
+testRoundFloat testLabel src expectedBits = let
   rounded = roundFloat src :: dest
   in do
   testFootnote (==) (toBitArray rounded) expectedBits $ unlines $
-    [ "\nTEST:     " <> label
+    [ "\nTEST:     " <> testLabel
     , "src:      " <> showFloatBits src
     , "rounded:  " <> showFloatBits rounded
     , "expected: " <> chunkedBitString [1, intVal @e', intVal @m'] expectedBits
