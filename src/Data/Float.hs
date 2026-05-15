@@ -267,8 +267,12 @@ instance (KnownNat (m + 1), KnownNats b e m) => Enum (Format b e m) where -- TOD
       maxPower = undefined
 
       maxPreciseNatural = (2^maxPower) - 1
+--      maxNatural =
 
   fromEnum f = undefined
+
+maxSignificand :: forall n . (KnownNat n, KnownNat (n + 1)) => BitArray n
+maxSignificand = 2^(intVal @(n + 1))
 
 
 instance (KnownNats b e m) => FiniteBits (Format b e m) where
