@@ -53,6 +53,7 @@ main = Tasty.defaultMain $ Tasty.testGroup "Softfloat"
 
   , Tasty.testGroup "Misc"
     [ Tasty.testProperty "Storable peek/poke roundtrip" prop_storablePeekPokeRoundtrip
+    , Tasty.testProperty "Enum matches GHC" prop_enumMatchesGHC
     ]
 
   , Tasty.testGroup "Generators & misc"
@@ -121,6 +122,15 @@ prop_storablePeekPokeRoundtrip = H.property $ do
         poke ptr f
         peek ptr
       f === f'
+
+prop_enumMatchesGHC :: H.Property
+prop_enumMatchesGHC = H.property $ do
+  int <- H.forAll $ Gen.integral $ Range.linear @Int 0 maxBound
+  let native = toEnum int :: Native.Float
+      soft = toEnum int :: Soft.Float
+  H.footnote $ "int is " <> show int
+  toBitArray @32 native === toBitArray soft
+  return ()
 
 -- * Parsing
 
@@ -262,11 +272,11 @@ delayed a = liftIO $ do
 
 hot :: IO ()
 hot = do
-  main
-  -- return ()
-  -- -- runTest "unitTest_roundFloat" unitTest_roundFloat
+  -- main
+  runTest "prop_enumMatchesGHC" prop_enumMatchesGHC
   -- runTest "prop_roundFloat" $ H.withTests 10000 $ prop_roundFloat
   -- H.recheckAt (H.Seed 4199924757645690049 18376928715434158743) "80:eB3dCbA"  prop_roundFloat
+  -- return ()
 
 unitTest_BitsInstance :: H.Property
 unitTest_BitsInstance = unitTest $ do

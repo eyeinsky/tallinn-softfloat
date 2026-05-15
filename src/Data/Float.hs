@@ -236,14 +236,13 @@ minFiniteFloat, maxFiniteFloat :: forall b e m . KnownNats b e m => Format b e m
 minFiniteFloat = Format I maxExpBiased (maxBound :: BitArray m)
 maxFiniteFloat = Format O maxExpBiased (maxBound :: BitArray m)
 
-instance (KnownNats b e m) => Bounded (Format b e m) where -- TODO: IEEE-754?
-  -- TODO: should these be infinites?
-  minBound = minFiniteFloat
-  maxBound = maxFiniteFloat
+-- Bounded instance matches GHC: https://github.com/haskell/core-libraries-committee/issues/402
+instance (KnownNats b e m) => Bounded (Format b e m) where
+  minBound = ninf
+  maxBound = inf
 
 allValues :: forall b e m . KnownNats b e m => [Format b e m]
 allValues = [ninf] ++ allFiniteNegatives ++ allFinitePositives ++ [inf]
-  where
 
 allFinitePositives :: forall b e m . KnownNats b e m => [Format b e m]
 allFinitePositives = Format O <$> [0 .. maxExpBiased] <*> [0 .. maxSig]
@@ -257,17 +256,19 @@ ps = allFinitePositives
 ns :: forall b e m . KnownNats b e m => [Format b e m]
 ns = allFiniteNegatives
 
-instance KnownNats b e m => Enum (Format b e m) where -- TODO
-  toEnum i = if i >= 0
-    then if
-      | i == 0 -> ninf
-      | i < negCount -> undefined
-      | i > negCount -> undefined
-      | undefined -> inf
-    else error "Enum (Format b e m): toEnum negative Int"
+-- Enum instance matches GHC
+instance (KnownNat (m + 1), KnownNats b e m) => Enum (Format b e m) where -- TODO
+  toEnum i
+    | otherwise = undefined
     where
-      negCount = fromIntegral (maxExpBiased @e) * fromIntegral (maxSig @m)
+      (signedZero :: Format b e m, i') = if i < 0 then (negate zero, abs i) else (zero, i)
+      w = fromIntegral i' :: Word
 
+      maxPower = undefined
+
+      maxPreciseNatural = (2^maxPower) - 1
+
+  fromEnum f = undefined
 
 
 instance (KnownNats b e m) => FiniteBits (Format b e m) where
