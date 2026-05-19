@@ -147,6 +147,7 @@ roundFloat :: forall src dest {b} {e} {m} {b'} {e'} {m'} {dw} .
   , dest ~ Format b' e' m'
   , dw ~ m' - 1, KnownNat dw
   , HasPrecisionLabel src
+  , HasPrecisionLabel dest
   ) => Format b e m -> Format b' e' m'
 roundFloat f@(Format s e m) = unsafePerformIO $ wrap $ if
   -- upcast
@@ -232,7 +233,7 @@ instance Eq (Format b e m) where -- TODO: IEEE-754?
 -- | Minimal an maximal non-infinity values. Exponent for both is
 -- one-less than all-ones exponent, as otherwise it will be infinity
 -- or nan (depending on mantissa value).
-minFiniteFloat, maxFiniteFloat :: forall b e m . KnownNats b e m => Format b e m
+minFiniteFloat, maxFiniteFloat :: forall float b e m . (float ~ Format b e m, KnownNats b e m) => float
 minFiniteFloat = Format I maxExpBiased (maxBound :: BitArray m)
 maxFiniteFloat = Format O maxExpBiased (maxBound :: BitArray m)
 
@@ -257,19 +258,44 @@ ns :: forall b e m . KnownNats b e m => [Format b e m]
 ns = allFiniteNegatives
 
 -- Enum instance matches GHC
-instance (KnownNat (m + 1), KnownNats b e m) => Enum (Format b e m) where -- TODO
-  toEnum i
-    | otherwise = undefined
-    where
-      (signedZero :: Format b e m, i') = if i < 0 then (negate zero, abs i) else (zero, i)
-      w = fromIntegral i' :: Word
+instance (KnownNat (m + 1), KnownNats b e m, KnownSymbol (PrecisionLabel (Format b e m))) => Enum (Format b e m) where -- TODO
+  toEnum = unsafePerformIO . toEnumIO
+--     | otherwise = undefined
+--     where
+--       (signedZero :: Format b e m, i') = if i < 0 then (negate zero, abs i) else (zero, i)
+--       w = fromIntegral i' :: Word
 
-      maxPower = undefined
-
-      maxPreciseNatural = (2^maxPower) - 1
---      maxNatural =
 
   fromEnum f = undefined
+
+toEnumIO :: forall b e m . (KnownNats b e m, KnownSymbol (PrecisionLabel (Format b e m))) => Int -> IO (Format b e m)
+toEnumIO i = do
+  let
+      maxPower = min ((maxExp @e) + 1) ((intVal @m) + 1)
+      mpn = maxPreciseNatural @(Format b e m)
+      b = 0 :: Format b e m
+
+  pl "maxExp, mantissa bit width" $ (maxExp @e, intVal @m)
+  pl "min" ((maxExp @e) + 1, (intVal @m) + 1)
+  pl "maxPower" maxPower
+  putStrLn "--"
+  printFloatTypeInfo @(Format b e m)
+  putStrLn "--"
+
+  return $ if
+    | i > fromIntegral mpn -> let
+        hsb = highestSetBit i
+        i' = clearBit i hsb
+        in Format 0 0 0
+    | otherwise -> zero
+
+
+
+
+maxPreciseNatural :: forall f b e m . (f ~ Format b e m, KnownNats b e m) => Natural
+maxPreciseNatural = (2^maxPower) - 1
+  where
+    maxPower = min ((maxExp @e) + 1) ((intVal @m) + 1)
 
 maxSignificand :: forall n . (KnownNat n, KnownNat (n + 1)) => BitArray n
 maxSignificand = 2^(intVal @(n + 1))
@@ -733,13 +759,23 @@ isZero = \case
 
 -- * Misc
 
-printFloatTypeInfo :: forall float b e m . (float ~ Format b e m, KnownNats b e m) => IO ()
+printFloatTypeInfo
+  :: forall float b e m . (float ~ Format b e m, KnownNats b e m, HasPrecisionLabel float) => IO ()
 printFloatTypeInfo = mapM_ putStrLn (floatTypeInfo @float)
 
-floatTypeInfo :: forall float b e m . (float ~ Format b e m, KnownNats b e m) => [String]
+floatTypeInfo
+  :: forall float b e m .
+   ( float ~ Format b e m
+   , KnownNats b e m
+   , HasPrecisionLabel float)
+  => [String]
 floatTypeInfo =
-  [ "min/max exponent " <> show (minExp @e :: Integer, maxExp @e :: Integer)
-  , "bias " <> let bias'@(BitArray n) = bias @e in show (bias', n)
-  , "min/max float " <> show (minBound @float, maxBound @float)
-  , "around zero " <> show (setBit zeroBits 0 :: float)
+  [ l "min/max exponent " (minExp @e :: Integer, maxExp @e :: Integer)
+  , l "bias, bias bit battern " (let bias'@(BitArray n) = bias @e in (n, bias'))
+  , l "min/max finite float " (minFiniteFloat @float, maxFiniteFloat @float)
+  , l "floats nearest to zero " $ let f = setBit zeroBits 0 :: float in (negate f, f)
+  , l "max precise natural " (maxPreciseNatural @float)
+  , "bit pattern " <> showFloatBits (zero @b @e @m)
   ]
+  where
+    l label v = label <> " " <> show v

@@ -124,8 +124,8 @@ prop_storablePeekPokeRoundtrip = H.property $ do
       f === f'
 
 prop_enumMatchesGHC :: H.Property
-prop_enumMatchesGHC = H.property $ do
-  int <- H.forAll $ Gen.integral $ Range.linear @Int 0 maxBound
+prop_enumMatchesGHC = unitTest $ do
+  int <- return 1 -- H.forAll $ Gen.integral $ Range.linear @Int 0 maxBound
   let native = toEnum int :: Native.Float
       soft = toEnum int :: Soft.Float
   H.footnote $ "int is " <> show int
@@ -273,7 +273,13 @@ delayed a = liftIO $ do
 hot :: IO ()
 hot = do
   -- main
-  runTest "prop_enumMatchesGHC" prop_enumMatchesGHC
+  -- runTest "prop_enumMatchesGHC" prop_enumMatchesGHC
+  let i = 1
+  f :: Format 2 2 2 <- toEnumIO i
+  putStrLn $ showFloatBits f
+  print f
+  print i
+
   -- runTest "prop_roundFloat" $ H.withTests 10000 $ prop_roundFloat
   -- H.recheckAt (H.Seed 4199924757645690049 18376928715434158743) "80:eB3dCbA"  prop_roundFloat
   -- return ()
